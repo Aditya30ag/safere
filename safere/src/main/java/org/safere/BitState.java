@@ -27,8 +27,11 @@ import java.util.Arrays;
  */
 final class BitState {
 
-  /** Maximum speculative consumption window, independent of total input length. */
+  /** Default speculative consumption window when no later DFA end hint is available. */
   static final int SPECULATIVE_WINDOW_SIZE = 256;
+
+  /** Maximum consumption window for a speculative search sized by a forward DFA hint. */
+  static final int MAX_HINTED_WINDOW_SIZE = 2_048;
 
   /** Maximum bitmap size in bits. Limits the product of prog size × text length. */
   private static final int MAX_BITMAP_BITS = 256 * 1024;
@@ -404,6 +407,8 @@ final class BitState {
   /** Loop entry/check continuations, optionally including one adjacent capture write. */
   private final LoopEntry[] loopEntries;
 
+  private final LazyRuneLoop[] lazyRuneLoops;
+
   /** Progress checks immediately following captures, or null when none exist. */
   private final Inst[] captureProgressChecks;
 
@@ -479,6 +484,7 @@ final class BitState {
     }
     this.captureRunes = prog.captureRunes();
     this.loopEntries = prog.loopEntries();
+    this.lazyRuneLoops = prog.lazyRuneLoops();
     this.captureProgressChecks = prog.captureProgressChecks();
     this.greedyRunes = greedyRunes;
 
@@ -678,6 +684,16 @@ final class BitState {
                 return false;
               }
               break;
+            }
+            LazyRuneLoop loop = lazyRuneLoops == null ? null : lazyRuneLoops[id];
+            if (loop != null) {
+              pos = skipFailedLazyExits(loop, id, pos);
+              if (pos < 0) {
+                if (budgetExceeded) {
+                  return false;
+                }
+                break;
+              }
             }
             // Push second alternative first (it will be tried if first fails).
             if (shouldVisit(ip.out1, pos)) {
@@ -948,6 +964,52 @@ final class BitState {
     }
   }
 
+  /** Skips only exits that necessarily fail before any assertion or branch can be reached. */
+  private int skipFailedLazyExits(LazyRuneLoop loop, int id, int pos) {
+    Inst rune = loop.rune();
+    int steps = 0;
+    while (pos < endPos) {
+      int cp = text.asciiAt(pos);
+      if (cp < 0
+          || cp == loop.exitChar()
+          || !(rune.opCode == InstOp.OP_CHAR_RANGE
+              ? rune.matchesChar(cp)
+              : rune.matchesCharClass(cp))) {
+        break;
+      }
+      if (steps == 0) {
+        // The failed literal and the body each take one step. Walk the compiled exit once
+        // to count its NOPs, captures, and restores of active capture registers.
+        steps = 2;
+        Inst exit = instructions[loop.exitStart()];
+        while (exit.opCode == InstOp.OP_CAPTURE || exit.opCode == InstOp.OP_NOP) {
+          steps++;
+          if (exit.opCode == InstOp.OP_CAPTURE && exit.arg < ncap) {
+            steps++;
+          }
+          exit = instructions[exit.out];
+        }
+      }
+      if (WorkCounterConfig.ENABLED) {
+        // The interpreter decodes the byte once for the failed literal and once for the body.
+        WorkCounter.record(steps + (text instanceof Utf8InputScanner ? 2 : 0));
+      }
+      // No tracked ALT intervenes between the two consumers. Check the budget before the
+      // next ALT visit so that it observes the same pruning state as ordinary dispatch.
+      stepCount += steps;
+      if (stepCount > nextStepThreshold && !onStepThresholdExceeded()) {
+        return -1;
+      }
+      pos++;
+      // Keep cross-start pruning and logical ALT charges identical to the interpreter. At the
+      // window edge resume ordinary dispatch, which retains speculative bailout semantics.
+      if (!shouldVisit(id, pos) || !stepWithinBudget()) {
+        return -1;
+      }
+    }
+    return pos;
+  }
+
   /** Executes one progress check, returning a continuation or -1 when none is eligible. */
   private int progressContinuation(Inst check, int pos) {
     int reg = check.arg;
@@ -985,6 +1047,11 @@ final class BitState {
   /** Returns the current work budget. Package-private for testing. */
   long stepBudgetForTesting() {
     return stepBudget;
+  }
+
+  /** Returns the logical instruction charges from the last search. */
+  long stepCountForTesting() {
+    return stepCount;
   }
 
   /**
