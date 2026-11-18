@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -28,6 +29,63 @@ class BitStateTest {
 
   private static final int FLAGS =
       ParseFlags.PERL_X | ParseFlags.PERL_CLASSES | ParseFlags.PERL_B | ParseFlags.UNICODE_GROUPS;
+
+  @Test
+  void greedyRuneLoopsPreserveExitPriorityAndCaptureRollback() {
+    for (String body : List.of("a", "[a-z]", "[a-z0-9_]", "[é😀]", "(?i:a)")) {
+      for (String suffix : List.of("(a|ab)", "(ab|a)", "(a?)b", "b")) {
+        for (String quantifier : List.of("*", "+", "*?")) {
+          String regex = "(" + body + quantifier + ")" + suffix;
+          for (String input : List.of("", "a", "aab", "aaaab", "aaaac", "é😀b", "AAAAab")) {
+            assertConsistentAnchored(regex, input, false, false);
+            assertConsistentAnchored(regex, input, true, false);
+            assertConsistentAnchored(regex, input, true, true);
+            assertConsistentUnanchored(regex, input);
+          }
+        }
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("greedyRuneLoopWorkCases")
+  @Tag("work-counter")
+  void greedyRuneLoopsChargeTheSameWorkAsTheInterpreter(TestCase testCase) {
+    Prog prog = Pattern.compile(testCase.pattern()).prog();
+    assertThat(prog.greedyRunes()).isNotNull();
+    String text = testCase.input();
+    for (InputScanner scanner :
+        List.of(new StringInputScanner(text), new Utf8InputScanner(text.getBytes(UTF_8)))) {
+      for (boolean anchored : List.of(false, true)) {
+        int length = scanner.length();
+        int ncap = 2 * prog.numCaptures();
+        BitState fused = BitState.getOrCreate(null, prog, scanner, 0, length, ncap, false, false);
+        BitState interpreter = new BitState(prog, scanner, 0, length, ncap, false, false, null);
+
+        int[][] expected = new int[1][];
+        long interpreterWork =
+            WorkCounter.countForTesting(
+                () -> expected[0] = interpreter.doSearch(0, length, anchored));
+        long fusedWork =
+            WorkCounter.countForTesting(
+                () ->
+                    assertThat(fused.doSearch(0, length, anchored))
+                        .as("%s, anchored=%s", scanner.getClass().getSimpleName(), anchored)
+                        .isEqualTo(expected[0]));
+        assertThat(fusedWork)
+            .as("%s, anchored=%s", scanner.getClass().getSimpleName(), anchored)
+            .isEqualTo(interpreterWork);
+        assertThat(fused.budgetExceeded()).isEqualTo(interpreter.budgetExceeded());
+      }
+    }
+  }
+
+  private static Stream<TestCase> greedyRuneLoopWorkCases() {
+    return Stream.of(
+        new TestCase("(a*)(a|ab)", "a".repeat(128) + "b"),
+        new TestCase("([é😀]*)(😀b|b)", "é😀".repeat(64) + "b"),
+        new TestCase("(a+)(ab|c)", "a".repeat(128) + "xaaaab"));
+  }
 
   @Test
   void fusionMetadataIsSharedWhenInputGrowthRequiresANewWorkspace() {

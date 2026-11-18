@@ -213,7 +213,7 @@ final class BitState {
       bs = cached;
       bs.reset(text, startPos, textLen, ncap, longest, endMatch);
     } else {
-      bs = new BitState(prog, text, startPos, textLen, ncap, longest, endMatch);
+      bs = new BitState(prog, text, startPos, textLen, ncap, longest, endMatch, prog.greedyRunes());
     }
 
     return bs.doSearch(startPos, searchLimit, anchored, resultBuffer);
@@ -253,7 +253,7 @@ final class BitState {
       cached.reset(text, startPos, endPos, ncap, longest, endMatch);
       return cached;
     }
-    return new BitState(prog, text, startPos, endPos, ncap, longest, endMatch);
+    return new BitState(prog, text, startPos, endPos, ncap, longest, endMatch, prog.greedyRunes());
   }
 
   /**
@@ -407,6 +407,9 @@ final class BitState {
   /** Progress checks immediately following captures, or null when none exist. */
   private final Inst[] captureProgressChecks;
 
+  /** Consuming bodies of simple greedy loops, or null when none exist. */
+  private final Inst[] greedyRunes;
+
   private static final byte NOT_ALT = 0;
   private static final byte ALT = 1;
   private static final byte CYCLE_ALT = 2;
@@ -438,14 +441,16 @@ final class BitState {
   private int jobCount;
   private int basePos;
 
-  private BitState(
+  /** Creates a fresh workspace. Passing null greedy-loop metadata uses ordinary ALT dispatch. */
+  BitState(
       Prog prog,
       InputScanner text,
       int startPos,
       int endPos,
       int ncap,
       boolean longest,
-      boolean endMatch) {
+      boolean endMatch,
+      Inst[] greedyRunes) {
     this.prog = prog;
     this.instructions = prog.frozenInstructions();
     this.text = text;
@@ -475,6 +480,7 @@ final class BitState {
     this.captureRunes = prog.captureRunes();
     this.loopEntries = prog.loopEntries();
     this.captureProgressChecks = prog.captureProgressChecks();
+    this.greedyRunes = greedyRunes;
 
     int totalBits = progSize * textSlots;
     int visitedLen = (totalBits + 63) / 64;
@@ -665,6 +671,14 @@ final class BitState {
           case InstOp.OP_FAIL -> {}
 
           case InstOp.OP_ALT, InstOp.OP_ALT_MATCH -> {
+            Inst rune = greedyRunes == null ? null : greedyRunes[id];
+            if (rune != null) {
+              runGreedyLoop(id, ip, rune, pos);
+              if (budgetExceeded || windowExceeded) {
+                return false;
+              }
+              break;
+            }
             // Push second alternative first (it will be tried if first fails).
             if (shouldVisit(ip.out1, pos)) {
               push(ip.out1, pos);
@@ -892,6 +906,46 @@ final class BitState {
     }
 
     return matched;
+  }
+
+  /**
+   * Executes a greedy ALT/consumer cycle without redispatching each instruction. The entry ALT has
+   * already been charged. Keep every deferred exit and visitation in the original order, and charge
+   * each logical instruction so pruning activation and the work limit remain unchanged. Keep the
+   * helper small because HotSpot can inline it into the main interpreter loop when it is hot.
+   */
+  private void runGreedyLoop(int id, Inst alt, Inst rune, int pos) {
+    while (true) {
+      if (shouldVisit(alt.out1, pos)) {
+        push(alt.out1, pos);
+      }
+      if (!shouldVisit(alt.out, pos) || !stepWithinBudget()) {
+        return;
+      }
+      if (pos >= endPos) {
+        if (speculative && endPos < textLen) {
+          windowExceeded = true;
+        }
+        return;
+      }
+      int cp = WorkCounterConfig.ENABLED ? -1 : text.asciiAt(pos);
+      int nextPos = pos + 1;
+      if (cp < 0) {
+        long decoded = text.decodeForward(pos);
+        cp = InputScanner.codePoint(decoded);
+        nextPos = InputScanner.position(decoded);
+        if (speculative && nextPos > endPos) {
+          windowExceeded = true;
+          return;
+        }
+      }
+      boolean matches =
+          rune.opCode == InstOp.OP_CHAR_RANGE ? rune.matchesChar(cp) : rune.matchesCharClass(cp);
+      if (!matches || !shouldVisit(id, nextPos) || !stepWithinBudget()) {
+        return;
+      }
+      pos = nextPos;
+    }
   }
 
   /** Executes one progress check, returning a continuation or -1 when none is eligible. */
