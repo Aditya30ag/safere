@@ -1620,6 +1620,8 @@ final class DeclarativeBenchmarkPlan {
     SPLIT_LENGTH_SUM("splitLengthSum", false, true, Feature.SPLIT),
     COMPILE("compile", false, false),
     COMPILE_AND_FIND("compileAndFind", false, true, Feature.FIND),
+    COMPILE_AND_FIND_GROUP_PRESENT(
+        "compileAndFindGroupPresent", false, true, Feature.FIND, Feature.CAPTURE_PARTICIPATION),
     COMPILE_AND_MATCHES("compileAndMatches", false, true, Feature.MATCHES),
     COMPILE_AND_FIND_GROUP("compileAndFindGroup", false, true, Feature.FIND, Feature.CAPTURE_TEXT),
     COMPILE_AND_REPLACE_ALL("compileAndReplaceAll", false, true, Feature.REPLACE),
@@ -1735,6 +1737,12 @@ final class DeclarativeBenchmarkPlan {
         throw new IllegalArgumentException(
             id + " operation " + jsonName + " is incompatible with compileOnly mode");
       }
+      if (measurement.constraints().contains(ExecutionConstraint.PRECOMPILE_ASCII)
+          && (measurement.mode() != MeasurementMode.SINGLE_SHOT_COLD_START
+              || this != COMPILE_AND_FIND_GROUP_PRESENT)) {
+        throw new IllegalArgumentException(
+            id + " precompileAscii requires singleShotColdStart and compileAndFindGroupPresent");
+      }
     }
 
     EnumSet<Feature> requiredFeatures() {
@@ -1749,6 +1757,7 @@ final class DeclarativeBenchmarkPlan {
             FIND_GROUP_PRESENT,
             FIND_SAMPLED_GROUP,
             COMPILE_AND_FIND,
+            COMPILE_AND_FIND_GROUP_PRESENT,
             COMPILE_AND_MATCHES,
             FIND_ROTATING_UTF16,
             COMPILE_AND_FIND_ROTATING_UTF16,
@@ -1813,7 +1822,10 @@ final class DeclarativeBenchmarkPlan {
                 RecipeValueType.INTEGER,
                 "mode",
                 RecipeValueType.STRING);
-        case FIND_GROUP_PRESENT, FIND_GROUP, COMPILE_AND_FIND_GROUP ->
+        case FIND_GROUP_PRESENT,
+            FIND_GROUP,
+            COMPILE_AND_FIND_GROUP_PRESENT,
+            COMPILE_AND_FIND_GROUP ->
             Map.of("group", RecipeValueType.INTEGER);
         case REPLACE_FIRST,
             COMPILE_AND_REPLACE_ALL,
@@ -1849,7 +1861,11 @@ final class DeclarativeBenchmarkPlan {
             Set.of("groups");
         case UTF8_CAPTURE_BOUNDS -> Set.of("groups", "expectedBounds");
         case FIND_SAMPLED_GROUP -> Set.of("group", "count", "mode");
-        case FIND_GROUP_PRESENT, FIND_GROUP, COMPILE_AND_FIND_GROUP -> Set.of("group");
+        case FIND_GROUP_PRESENT,
+            FIND_GROUP,
+            COMPILE_AND_FIND_GROUP_PRESENT,
+            COMPILE_AND_FIND_GROUP ->
+            Set.of("group");
         case REPLACE_FIRST,
             COMPILE_AND_REPLACE_ALL,
             REPLACE_ALL,
@@ -2244,6 +2260,7 @@ final class DeclarativeBenchmarkPlan {
   enum ExecutionConstraint implements JsonNamed {
     NO_FORK("noFork"),
     FRESH_PROCESS_PER_INVOCATION("freshProcessPerInvocation"),
+    PRECOMPILE_ASCII("precompileAscii"),
     RETAIN_STATE("retainState"),
     PREMATERIALIZED_INPUT("prematerializedInput"),
     ALLOCATION_PROFILE("allocationProfile");

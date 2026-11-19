@@ -28,7 +28,12 @@ import org.junit.jupiter.api.parallel.Resources;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.openjdk.jmh.infra.Blackhole;
+import org.safere.Pattern;
+import org.safere.PatternCompiledEvent;
+import org.safere.PatternFeature;
+import org.safere.SafeReMatchDiagnostics;
 
 class CrossEngineBenchmarkPlanTest {
   // This is a historical floor, not a snapshot. Additions do not raise it.
@@ -885,17 +890,193 @@ class CrossEngineBenchmarkPlanTest {
             "Today's password is swordfish. I understand instantiating Blackholes directly is"
                 + " dangerous.");
 
-    CrossEngineTrialRunner runner =
+    try (CrossEngineTrialRunner runner =
         CrossEngineTrialRunner.prepareColdStart(
-            BenchmarkData.get(), trial, CrossEngineWorkload.TimingGroup.MILLISECONDS);
-    assertThatThrownBy(() -> runner.run(blackhole)).isInstanceOf(IllegalArgumentException.class);
-    if (operation == BenchmarkOperation.COMPILE) {
-      runner.close();
-    } else {
-      // Cold compound operations also validate after timing; they must not warm compilation in
-      // setup.
-      assertThatThrownBy(runner::close).isInstanceOf(IllegalArgumentException.class);
+            BenchmarkData.get(), trial, CrossEngineWorkload.TimingGroup.MILLISECONDS)) {
+      assertThatThrownBy(() -> runner.run(blackhole)).isInstanceOf(IllegalArgumentException.class);
+      // A failed invocation has no result to validate. Validation must not recompile the pattern.
+      assertThatCode(runner::validateMeasuredResult).doesNotThrowAnyException();
     }
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "COMPILE_AND_FIND,safere-string",
+    "COMPILE_AND_MATCHES,safere-string",
+    "COMPILE_AND_FIND_GROUP_PRESENT,safere-string",
+    "COMPILE_AND_FIND_GROUP_PRESENT,safere-utf8"
+  })
+  void coldCombinedPreparationDoesNotCompileBeforeMeasurement(String operation, String engine) {
+    CrossEngineWorkload workload = coldFirstUseWorkload(BenchmarkOperation.valueOf(operation), "(");
+    CrossEngineBenchmarkPlan.Trial trial =
+        new CrossEngineBenchmarkPlan.Trial(workload, RegexEngineVariant.fromId(engine));
+    try (CrossEngineTrialRunner runner =
+        CrossEngineTrialRunner.prepareColdStart(
+            BenchmarkData.get(), trial, CrossEngineWorkload.TimingGroup.MILLISECONDS)) {
+      assertThatThrownBy(() -> runner.run(testBlackhole()))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "FIND_GROUP_PRESENT,safere-string",
+    "FIND_GROUP_PRESENT,safere-utf8",
+    "COMPILE_AND_FIND_GROUP_PRESENT,safere-string",
+    "COMPILE_AND_FIND_GROUP_PRESENT,safere-utf8"
+  })
+  void coldFirstUsePreparationDoesNotSearchOrReadCaptures(String operation, String engine) {
+    // The input matches, but this pattern has no group 1. Setup must not touch that group.
+    CrossEngineWorkload workload = coldFirstUseWorkload(BenchmarkOperation.valueOf(operation), "a");
+    CrossEngineBenchmarkPlan.Trial trial =
+        new CrossEngineBenchmarkPlan.Trial(workload, RegexEngineVariant.fromId(engine));
+    try (CrossEngineTrialRunner runner =
+        CrossEngineTrialRunner.prepareColdStart(
+            BenchmarkData.get(), trial, CrossEngineWorkload.TimingGroup.MILLISECONDS)) {
+      assertThatThrownBy(() -> runner.run(testBlackhole()))
+          .isInstanceOf(IndexOutOfBoundsException.class);
+    }
+  }
+
+  @Test
+  void coldFirstUseFixturesMatchJdkCaptureBoundsInBothRepresentations() {
+    BenchmarkData data = BenchmarkData.get();
+    for (CrossEngineWorkload workload : CrossEngineBenchmarkPlan.load().workloads()) {
+      if (!workload.id().startsWith("InitializationLatencyBenchmark.")) {
+        continue;
+      }
+      String text = data.getInputString(workload.inputKeys().getFirst());
+      java.util.regex.Matcher expected =
+          java.util.regex.Pattern.compile(workload.patterns().getFirst()).matcher(text);
+      boolean found = expected.find();
+      assertThat(found).as(workload.id()).isEqualTo(workload.expected());
+      if (found) {
+        assertThat(expected.start(1)).isNotNegative();
+      }
+      for (RegexEngineVariant variant :
+          List.of(RegexEngineVariant.SAFERE_STRING, RegexEngineVariant.SAFERE_UTF8)) {
+        try (RegexEngineVariant.CompiledRegex pattern =
+            variant.compile(workload.patterns().getFirst())) {
+          RegexEngineVariant.MatchCursor actual =
+              pattern.matcher(variant.prepareInputs(data, workload.inputKeys()).getFirst());
+          assertThat(actual.find()).as("%s, %s", workload.id(), variant).isEqualTo(found);
+          if (!found) {
+            continue;
+          }
+          for (int group = 0; group <= 1; group++) {
+            int start = expected.start(group);
+            int end = expected.end(group);
+            if (variant == RegexEngineVariant.SAFERE_UTF8) {
+              start = text.substring(0, start).getBytes(StandardCharsets.UTF_8).length;
+              end = text.substring(0, end).getBytes(StandardCharsets.UTF_8).length;
+            }
+            assertThat(actual.start(group)).isEqualTo(start);
+            assertThat(actual.end(group)).isEqualTo(end);
+          }
+        }
+      }
+    }
+  }
+
+  @Test
+  void coldBenchmarkRejectsRepeatedInvocationsInOneFork() {
+    CrossEngineColdStartBenchmark benchmark = new CrossEngineColdStartBenchmark();
+    benchmark.crossEngineColdStartTrial =
+        "InitializationLatencyBenchmark.firstFind.graphemeCluster@safere-string";
+    benchmark.setup();
+    try {
+      benchmark.run(testBlackhole());
+      assertThatThrownBy(() -> benchmark.run(testBlackhole()))
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessageContaining("one invocation per fresh fork");
+    } finally {
+      benchmark.tearDown();
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"asciiWord", "javaLowerCase"})
+  void coldAsciiPrimerCompilesOnlyAnUnrelatedLiteralDuringSetup(String fixture) {
+    CrossEngineBenchmarkPlan plan = CrossEngineBenchmarkPlan.load();
+    String prefix = "InitializationLatencyBenchmark.";
+    String suffix = "." + fixture + "@safere-string";
+    CrossEngineWorkload unprimed = plan.resolve(prefix + "compileAndFirstFind" + suffix).workload();
+    CrossEngineBenchmarkPlan.Trial primed =
+        plan.resolve(prefix + "compileAndFirstFindAfterAscii" + suffix);
+    assertThat(primed.workload().patterns()).isEqualTo(unprimed.patterns());
+    assertThat(primed.workload().inputKeys()).isEqualTo(unprimed.inputKeys());
+
+    List<PatternCompiledEvent> compilations = new ArrayList<>();
+    SafeReMatchDiagnostics previous = Pattern.diagnostics();
+    Pattern.setDiagnostics(
+        new SafeReMatchDiagnostics() {
+          @Override
+          public void onPatternCompiled(PatternCompiledEvent event) {
+            compilations.add(event);
+          }
+        });
+    try (CrossEngineTrialRunner runner =
+        CrossEngineTrialRunner.prepareColdStart(
+            BenchmarkData.get(), primed, CrossEngineWorkload.TimingGroup.MILLISECONDS)) {
+      assertThat(compilations).hasSize(1);
+      assertThat(compilations.getFirst().pattern().analysis().features())
+          .contains(PatternFeature.LITERAL)
+          .doesNotContain(PatternFeature.CAPTURES);
+      runner.run(testBlackhole());
+      runner.validateMeasuredResult();
+      assertThat(compilations).hasSize(2);
+      assertThat(compilations.getLast().pattern().analysis().features())
+          .contains(PatternFeature.CAPTURES);
+    } finally {
+      Pattern.setDiagnostics(previous);
+    }
+  }
+
+  @Test
+  void coldValidationChecksTheMeasuredResultAfterTheOperationReturns() {
+    CrossEngineWorkload workload =
+        coldFirstUseWorkload(BenchmarkOperation.FIND_GROUP_PRESENT, "(z)");
+    CrossEngineBenchmarkPlan.Trial trial =
+        new CrossEngineBenchmarkPlan.Trial(workload, RegexEngineVariant.SAFERE_STRING);
+    try (CrossEngineTrialRunner runner =
+        CrossEngineTrialRunner.prepareColdStart(
+            BenchmarkData.get(), trial, CrossEngineWorkload.TimingGroup.MILLISECONDS)) {
+      // The measured search returns false, whereas the declaration expects true.
+      assertThatCode(() -> runner.run(testBlackhole())).doesNotThrowAnyException();
+      assertThatThrownBy(runner::validateMeasuredResult)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("expected true but was false");
+    }
+  }
+
+  private static CrossEngineWorkload coldFirstUseWorkload(
+      BenchmarkOperation operation, String regex) {
+    CrossEngineWorkload base =
+        CrossEngineBenchmarkPlan.load()
+            .resolve("InitializationLatencyBenchmark.firstFind.asciiWord@safere-string")
+            .workload();
+    return new CrossEngineWorkload(
+        base.id(),
+        operation,
+        List.of(regex),
+        base.inputKeys(),
+        base.groups(),
+        base.replacement(),
+        base.expected(),
+        base.limit(),
+        base.lifecycle(),
+        base.flagSet(),
+        base.seed(),
+        base.count(),
+        base.mode(),
+        base.measurement(),
+        base.timingGroup());
+  }
+
+  private static Blackhole testBlackhole() {
+    return new Blackhole(
+        "Today's password is swordfish. I understand instantiating Blackholes directly is"
+            + " dangerous.");
   }
 
   @Test

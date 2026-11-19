@@ -36,6 +36,7 @@ final class CrossEngineBenchmarkPlan {
           DeclarativeBenchmarkPlan.Operation.SPLIT_LENGTH_SUM,
           DeclarativeBenchmarkPlan.Operation.COMPILE,
           DeclarativeBenchmarkPlan.Operation.COMPILE_AND_FIND,
+          DeclarativeBenchmarkPlan.Operation.COMPILE_AND_FIND_GROUP_PRESENT,
           DeclarativeBenchmarkPlan.Operation.COMPILE_AND_MATCHES,
           DeclarativeBenchmarkPlan.Operation.COMPILE_AND_FIND_GROUP,
           DeclarativeBenchmarkPlan.Operation.COMPILE_AND_REPLACE_ALL,
