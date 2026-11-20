@@ -512,6 +512,8 @@ final class FuzzSupport {
               });
       if (completed) {
         output.append(safeRe);
+      } else {
+        assertSameRejectedAppendDestination(safeRe, jdk);
       }
       return completed;
     }
@@ -537,8 +539,21 @@ final class FuzzSupport {
               });
       if (completed) {
         output.append(safeRe);
+      } else {
+        assertSameRejectedAppendDestination(safeRe, jdk);
       }
       return completed;
+    }
+
+    /**
+     * After both engines reject a replacement, compares their destinations. The JDK leaves the
+     * destination unchanged, so partial output from either engine is a divergence.
+     */
+    private void assertSameRejectedAppendDestination(CharSequence safeRe, CharSequence jdk) {
+      if (jdkOracleAvailable) {
+        assertSame(
+            "appendReplacement destination after rejection", safeRe.toString(), jdk.toString());
+      }
     }
 
     void appendTail(StringBuilder output) {

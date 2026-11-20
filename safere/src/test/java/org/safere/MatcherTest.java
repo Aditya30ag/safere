@@ -2016,6 +2016,40 @@ class MatcherTest {
           .isInstanceOf(IllegalArgumentException.class);
     }
 
+    // As in java.util.regex, a rejected replacement must not append the intervening input or a
+    // partial expansion, and must not advance the append position.
+    @ParameterizedTest
+    @ValueSource(
+        strings = {"lit\\", "lit$", "lit$9", "lit$x", "lit${g", "lit${}", "lit${nope}", "$1$9"})
+    void rejectedAppendReplacementLeavesStringBuilderUnchanged(String replacement) {
+      Matcher m = Pattern.compile("(?<g>b)").matcher("abc");
+      assertThat(m.find()).isTrue();
+      StringBuilder sb = new StringBuilder("X");
+      assertThatThrownBy(() -> m.appendReplacement(sb, replacement))
+          .isInstanceOfAny(IllegalArgumentException.class, IndexOutOfBoundsException.class);
+      assertThat(sb.toString()).isEqualTo("X");
+
+      m.appendReplacement(sb, "[$1]");
+      m.appendTail(sb);
+      assertThat(sb.toString()).isEqualTo("Xa[b]c");
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {"lit\\", "lit$", "lit$9", "lit$x", "lit${g", "lit${}", "lit${nope}", "$1$9"})
+    void rejectedAppendReplacementLeavesStringBufferUnchanged(String replacement) {
+      Matcher m = Pattern.compile("(?<g>b)").matcher("abc");
+      assertThat(m.find()).isTrue();
+      StringBuffer sb = new StringBuffer("X");
+      assertThatThrownBy(() -> m.appendReplacement(sb, replacement))
+          .isInstanceOfAny(IllegalArgumentException.class, IndexOutOfBoundsException.class);
+      assertThat(sb.toString()).isEqualTo("X");
+
+      m.appendReplacement(sb, "[$1]");
+      m.appendTail(sb);
+      assertThat(sb.toString()).isEqualTo("Xa[b]c");
+    }
+
     // Only the ASCII digits '0'-'9' can start or continue a numeric group reference, as in
     // java.util.regex. Other Unicode decimal digits (Arabic-Indic, fullwidth, ...) after '$' are
     // illegal group references, not group numbers derived from the code point's distance from '0'.

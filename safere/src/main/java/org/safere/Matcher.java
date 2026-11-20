@@ -4354,6 +4354,8 @@ public final class Matcher implements MatchResult {
    * etc. for numbered groups, and {@code ${name}} for named groups. Use {@code \\} for a literal
    * backslash and {@code \$} for a literal dollar sign.
    *
+   * <p>If the replacement string is rejected, {@code sb} is left unchanged.
+   *
    * @param sb the target string builder
    * @param replacement the replacement string
    * @return this matcher
@@ -4363,8 +4365,16 @@ public final class Matcher implements MatchResult {
   public Matcher appendReplacement(StringBuilder sb, String replacement) {
     modCount++;
     checkMatch();
-    sb.append(text, appendPos, start());
-    appendReplacementBody(sb, replacement);
+    // The replacement is validated while it is expanded. Roll back the partial output on
+    // rejection so the destination is unchanged, as with the JDK and the StringBuffer overload.
+    int restoreLength = sb.length();
+    try {
+      sb.append(text, appendPos, start());
+      appendReplacementBody(sb, replacement);
+    } catch (RuntimeException e) {
+      sb.setLength(restoreLength);
+      throw e;
+    }
     appendPos = end();
     return this;
   }
