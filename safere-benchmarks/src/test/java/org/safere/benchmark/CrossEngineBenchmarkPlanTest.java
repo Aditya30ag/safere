@@ -57,6 +57,159 @@ class CrossEngineBenchmarkPlanTest {
   }
 
   @Test
+  void observationMatrixUsesIdenticalPatternsAndInputsWithExplicitExclusions() {
+    CrossEngineBenchmarkPlan plan = CrossEngineBenchmarkPlan.load();
+    var workloads =
+        plan.workloads().stream()
+            .filter(workload -> workload.id().startsWith("QuantifiedCaptureBenchmark."))
+            .toList();
+    assertThat(workloads).isNotEmpty();
+    for (String family :
+        List.of("nestedGreedy", "boundedGreedy", "boundedLazy", "optionalGreedy", "optionalLazy")) {
+      for (String outcome : List.of("match", "reject")) {
+        for (int size : List.of(128, 512, 2048, 8192, 32768)) {
+          String prefix = "QuantifiedCaptureBenchmark." + family + ".";
+          String suffix = "." + outcome + "." + size;
+          var observations =
+              workloads.stream()
+                  .filter(workload ->
+                      workload.id().startsWith(prefix) && workload.id().endsWith(suffix))
+                  .toList();
+          assertThat(observations)
+              .extracting(workload ->
+                  workload
+                      .id()
+                      .substring(prefix.length(), workload.id().length() - suffix.length()))
+              .containsExactlyInAnyOrder(
+                  "boolean", "groupZero", "participation", "text", "numbered", "named", "function");
+          assertThat(observations.stream().map(CrossEngineWorkload::patterns).distinct())
+              .hasSize(1);
+          assertThat(observations.stream().map(CrossEngineWorkload::inputKeys).distinct())
+              .hasSize(1);
+          for (CrossEngineWorkload workload : observations) {
+            List<String> expectedVariants = new ArrayList<>(List.of("safere-string"));
+            String observation =
+                workload.id().substring(prefix.length(), workload.id().length() - suffix.length());
+            if (!observation.equals("function")) {
+              expectedVariants.addAll(List.of("safere-utf8", "safere-utf8-vector"));
+            }
+            if (!outcome.equals("reject") || size == 128 || family.startsWith("optional")) {
+              expectedVariants.add("jdk-string");
+            }
+            if (!observation.equals("function")) {
+              expectedVariants.add("re2j-string");
+            }
+            if (!observation.equals("function") && !observation.equals("named")) {
+              expectedVariants.add("re2-ffm-string-conversion");
+            }
+            assertThat(
+                    plan.trials(CrossEngineWorkload.TimingGroup.NANOSECONDS).stream()
+                        .filter(trial -> trial.workload().id().equals(workload.id()))
+                        .map(trial -> trial.variant().id()))
+                .containsExactlyInAnyOrderElementsOf(expectedVariants);
+          }
+        }
+      }
+    }
+  }
+
+  @Test
+  void everyTrialValidatesExactCapturesAndReplacementOutputsAndRunsBoundTask() {
+    BenchmarkData data = BenchmarkData.get();
+    Blackhole blackhole =
+        new Blackhole(
+            "Today's password is swordfish. I understand instantiating Blackholes directly is"
+                + " dangerous.");
+    var trials =
+        CrossEngineBenchmarkPlan.load().trials(CrossEngineWorkload.TimingGroup.NANOSECONDS);
+    for (var trial : trials) {
+      CrossEngineWorkload workload = trial.workload();
+      // Vector-provider trials run in their dedicated JVM configuration; this pass uses default.
+      if (!workload.id().startsWith("QuantifiedCaptureBenchmark.")
+          || trial.variant() == RegexEngineVariant.SAFERE_UTF8_VECTOR) {
+        continue;
+      }
+      String input = data.getInputString(workload.inputKeys().getFirst());
+      boolean matched = workload.id().contains(".match.");
+      var inputs = trial.variant().prepareInputs(data, workload.inputKeys());
+      try (var compiled = trial.variant().compile(workload.patterns().getFirst())) {
+        var matcher = compiled.matcher(inputs.getFirst());
+        assertThat(matcher.find()).as(trial.id()).isEqualTo(matched);
+        if (matched) {
+          assertThat(matcher.start(0)).as(trial.id()).isZero();
+          assertThat(matcher.end(0)).as(trial.id()).isEqualTo(input.length());
+          if (trial.variant().capabilities().contains(EngineCapability.GROUP_TEXT)) {
+            assertThat(matcher.group(0)).as(trial.id()).isEqualTo(input);
+            assertThat(matcher.group(1)).as(trial.id()).isEqualTo("a");
+          }
+          int captureStart = input.lastIndexOf('a');
+          // Nested repeats intentionally differ from the JDK's earlier-copy bounds (#1079).
+          // The captured text is identical on these subjects; pin each engine's actual policy.
+          if (trial.variant() == RegexEngineVariant.JDK_STRING
+              && !workload.id().contains(".optional")) {
+            captureStart--;
+          }
+          assertThat(matcher.start(1)).as(trial.id()).isEqualTo(captureStart);
+          assertThat(matcher.end(1)).as(trial.id()).isEqualTo(captureStart + 1);
+        }
+        Object actual =
+            workload
+                .operation()
+                .execute(
+                    trial.variant(),
+                    workload.patterns(),
+                    List.of(compiled),
+                    inputs,
+                    workload.groups(),
+                    trial.variant().prepareReplacement(workload.replacement()),
+                    workload.limit(),
+                    workload.lifecycle(),
+                    workload.flagSet(),
+                    workload.seed(),
+                    workload.count(),
+                    workload.mode());
+        Object expected =
+            switch (workload.operation()) {
+              case FIND, FIND_GROUP_PRESENT -> matched;
+              case FIND_GROUP -> matched ? "a" : null;
+              case REPLACE_ALL, REPLACE_ALL_FUNCTION -> matched ? "a" : input;
+              default -> throw new AssertionError(workload.operation());
+            };
+        assertThat(actual).as(trial.id()).isEqualTo(expected);
+        // Reuse the expanded plan and compiled pattern while checking every bound operation.
+        // Runner preparation itself is covered by the representative entry-point tests below.
+        workload
+            .operation()
+            .bind(
+                trial.variant(),
+                workload.patterns(),
+                List.of(compiled),
+                inputs,
+                workload.groups(),
+                trial.variant().prepareReplacement(workload.replacement()),
+                workload.limit(),
+                workload.lifecycle(),
+                workload.flagSet(),
+                workload.seed(),
+                workload.count(),
+                workload.mode())
+            .run(blackhole);
+      }
+    }
+  }
+
+  @Test
+  void functionalReplacementCapabilityRequiresTheNativeApi() {
+    for (RegexEngineVariant variant : RegexEngineVariant.values()) {
+      assertThat(BenchmarkOperation.REPLACE_ALL_FUNCTION.isSupportedBy(variant))
+          .as(variant.id())
+          .isEqualTo(
+              variant == RegexEngineVariant.SAFERE_STRING
+                  || variant == RegexEngineVariant.JDK_STRING);
+    }
+  }
+
+  @Test
   void everyRunnableRe2jPatternCompiles() {
     List<MaterializedExecutionPlan.Entry> entries =
         MaterializedExecutionPlan.load().entries().stream()
@@ -1492,11 +1645,10 @@ class CrossEngineBenchmarkPlanTest {
               .isEqualTo(matches);
           assertThat(events.subList(0, matches))
               .as(variant.id())
-              .allSatisfy(
-                  event -> {
-                    assertThat(event.boundaryStrategy()).isEqualTo(MatchStrategy.DFA);
-                    assertThat(event.reverseDfaSearchCount()).isEqualTo(1);
-                  });
+              .allSatisfy(event -> {
+                assertThat(event.boundaryStrategy()).isEqualTo(MatchStrategy.DFA);
+                assertThat(event.reverseDfaSearchCount()).isEqualTo(1);
+              });
         }
       }
     } finally {
