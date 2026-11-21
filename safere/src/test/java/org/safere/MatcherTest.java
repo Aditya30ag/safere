@@ -20,6 +20,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /** Tests for {@link Matcher}. */
@@ -2016,17 +2017,16 @@ class MatcherTest {
           .isInstanceOf(IllegalArgumentException.class);
     }
 
-    // As in java.util.regex, a rejected replacement must not append the intervening input or a
-    // partial expansion, and must not advance the append position.
+    // As in java.util.regex, a malformed replacement (IllegalArgumentException) must not append
+    // the intervening input or a partial expansion, and must not advance the append position.
     @ParameterizedTest
-    @ValueSource(
-        strings = {"lit\\", "lit$", "lit$9", "lit$x", "lit${g", "lit${}", "lit${nope}", "$1$9"})
-    void rejectedAppendReplacementLeavesStringBuilderUnchanged(String replacement) {
+    @ValueSource(strings = {"lit\\", "lit$", "lit$x", "lit${g", "lit${}", "lit${nope}", "$1$x"})
+    void malformedAppendReplacementLeavesStringBuilderUnchanged(String replacement) {
       Matcher m = Pattern.compile("(?<g>b)").matcher("abc");
       assertThat(m.find()).isTrue();
       StringBuilder sb = new StringBuilder("X");
       assertThatThrownBy(() -> m.appendReplacement(sb, replacement))
-          .isInstanceOfAny(IllegalArgumentException.class, IndexOutOfBoundsException.class);
+          .isInstanceOf(IllegalArgumentException.class);
       assertThat(sb.toString()).isEqualTo("X");
 
       m.appendReplacement(sb, "[$1]");
@@ -2034,15 +2034,42 @@ class MatcherTest {
       assertThat(sb.toString()).isEqualTo("Xa[b]c");
     }
 
+    // OpenJDK rolls back only IllegalArgumentException. A reference to a missing group number
+    // throws IndexOutOfBoundsException and keeps the intervening input and the partial expansion.
     @ParameterizedTest
-    @ValueSource(
-        strings = {"lit\\", "lit$", "lit$9", "lit$x", "lit${g", "lit${}", "lit${nope}", "$1$9"})
-    void rejectedAppendReplacementLeavesStringBufferUnchanged(String replacement) {
+    @CsvSource({"lit$9, Xalit", "$1$9, Xab", "$9, Xa"})
+    void appendReplacementWithMissingGroupKeepsPartialStringBuilderOutput(
+        String replacement, String expected) {
+      Matcher m = Pattern.compile("(?<g>b)").matcher("abc");
+      assertThat(m.find()).isTrue();
+      StringBuilder sb = new StringBuilder("X");
+      assertThatThrownBy(() -> m.appendReplacement(sb, replacement))
+          .isInstanceOf(IndexOutOfBoundsException.class);
+      assertThat(sb.toString()).isEqualTo(expected);
+    }
+
+    // OpenJDK does not roll back a NullPointerException, so the intervening input remains.
+    @Test
+    void appendReplacementWithNullReplacementKeepsPrecedingStringBuilderText() {
+      Matcher m = Pattern.compile("(?<g>b)").matcher("abc");
+      assertThat(m.find()).isTrue();
+      StringBuilder sb = new StringBuilder("X");
+      assertThatThrownBy(() -> m.appendReplacement(sb, null))
+          .isInstanceOf(NullPointerException.class);
+      assertThat(sb.toString()).isEqualTo("Xa");
+    }
+
+    // The IndexOutOfBoundsException outcome of the StringBuffer overload differs from OpenJDK,
+    // which keeps the partial output there too; only the IllegalArgumentException rollback is
+    // pinned here.
+    @ParameterizedTest
+    @ValueSource(strings = {"lit\\", "lit$", "lit$x", "lit${g", "lit${}", "lit${nope}", "$1$x"})
+    void malformedAppendReplacementLeavesStringBufferUnchanged(String replacement) {
       Matcher m = Pattern.compile("(?<g>b)").matcher("abc");
       assertThat(m.find()).isTrue();
       StringBuffer sb = new StringBuffer("X");
       assertThatThrownBy(() -> m.appendReplacement(sb, replacement))
-          .isInstanceOfAny(IllegalArgumentException.class, IndexOutOfBoundsException.class);
+          .isInstanceOf(IllegalArgumentException.class);
       assertThat(sb.toString()).isEqualTo("X");
 
       m.appendReplacement(sb, "[$1]");
