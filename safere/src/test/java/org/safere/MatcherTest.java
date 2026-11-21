@@ -2036,6 +2036,8 @@ class MatcherTest {
 
     // OpenJDK rolls back only IllegalArgumentException. A reference to a missing group number
     // throws IndexOutOfBoundsException and keeps the intervening input and the partial expansion.
+    @DisabledForCrosscheck(
+        "crosscheck facade appends to the caller's builder only after appendReplacement succeeds")
     @ParameterizedTest
     @CsvSource({"lit$9, Xalit", "$1$9, Xab", "$9, Xa"})
     void appendReplacementWithMissingGroupKeepsPartialStringBuilderOutput(
@@ -2049,6 +2051,8 @@ class MatcherTest {
     }
 
     // OpenJDK does not roll back a NullPointerException, so the intervening input remains.
+    @DisabledForCrosscheck(
+        "crosscheck facade appends to the caller's builder only after appendReplacement succeeds")
     @Test
     void appendReplacementWithNullReplacementKeepsPrecedingStringBuilderText() {
       Matcher m = Pattern.compile("(?<g>b)").matcher("abc");
