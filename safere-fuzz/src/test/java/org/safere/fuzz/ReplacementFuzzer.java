@@ -74,6 +74,29 @@ public final class ReplacementFuzzer {
     }
   }
 
+  /**
+   * Generates templates whose expansion fails after literal text or a valid group reference has
+   * been written, so the append oracle checks the destination after partial output. This target has
+   * its own decoder so saved inputs for {@link #replacement} keep their meaning.
+   */
+  @FuzzTest(maxDuration = "30s")
+  void rejectedReplacementRollback(FuzzedDataProvider data) {
+    String regex = data.pickValue(PARTIAL_OUTPUT_PATTERNS);
+    StringBuilder input = new StringBuilder();
+    int length = data.consumeInt(0, 16);
+    for (int i = 0; i < length; i++) {
+      input.append(data.pickValue(List.of("x", "y", "a", "xy")));
+    }
+    String replacement =
+        data.pickValue(PARTIAL_OUTPUT_PREFIXES) + data.pickValue(MALFORMED_REPLACEMENT_SUFFIXES);
+    FuzzSupport.CompiledPattern pattern = FuzzSupport.compileOrSkip(regex, 0);
+    if (pattern == null) {
+      return;
+    }
+    appendReplacementLoop(pattern, input.toString(), replacement, false);
+    appendReplacementLoop(pattern, input.toString(), replacement, true);
+  }
+
   @FuzzTest(maxDuration = "30s")
   void replacement(FuzzedDataProvider data) {
     fuzzerTestOneInput(data);
@@ -147,19 +170,6 @@ public final class ReplacementFuzzer {
       flags = 0;
       input = "a" + data.consumeString(8);
       replacement = nonAsciiDigitReplacement(data);
-    } else if (data.consumeBoolean()) {
-      // A malformed suffix after literal text or a valid group reference makes the expansion fail
-      // after writing partial output, which must be rolled back only as the JDK does.
-      regex = data.pickValue(PARTIAL_OUTPUT_PATTERNS);
-      flags = 0;
-      StringBuilder text = new StringBuilder();
-      int length = data.consumeInt(0, 16);
-      for (int i = 0; i < length; i++) {
-        text.append(data.pickValue(List.of("x", "y", "a", "xy")));
-      }
-      input = text.toString();
-      replacement =
-          data.pickValue(PARTIAL_OUTPUT_PREFIXES) + data.pickValue(MALFORMED_REPLACEMENT_SUFFIXES);
     } else {
       regex = data.consumeString(256);
       flags = FuzzSupport.consumeFlags(data);

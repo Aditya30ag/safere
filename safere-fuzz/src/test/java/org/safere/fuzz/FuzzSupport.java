@@ -546,11 +546,12 @@ final class FuzzSupport {
     }
 
     /**
-     * After both engines reject a replacement, compares their destinations where the JDK's outcome
-     * is defined by its rollback rule. OpenJDK rolls back an {@link IllegalArgumentException}, so
-     * both destinations must be unchanged. Both overloads keep the partial output on an {@link
-     * IndexOutOfBoundsException}; SafeRE matches that for {@link StringBuilder}, but its {@link
-     * StringBuffer} overload leaves the destination unchanged, so that combination is not compared.
+     * After both engines reject a replacement, checks the destinations, which both start empty.
+     * OpenJDK rolls back an {@link IllegalArgumentException}, so both destinations must be
+     * unchanged. Both JDK overloads keep the partial output on an {@link
+     * IndexOutOfBoundsException}. SafeRE matches that for {@link StringBuilder}. Its {@link
+     * StringBuffer} overload expands into a temporary builder and leaves the destination unchanged,
+     * so that case is checked against this SafeRE model instead of the JDK.
      */
     private void assertSameRejectedAppendDestination(
         ReplacementOutcome outcome, CharSequence safeRe, CharSequence jdk, boolean stringBuffer) {
@@ -559,16 +560,21 @@ final class FuzzSupport {
       if (!jdkOracleAvailable || safeReRejection == null || jdkRejection == null) {
         return;
       }
-      boolean rolledBack =
-          safeReRejection instanceof IllegalArgumentException
-              && jdkRejection instanceof IllegalArgumentException;
-      boolean partialBuilderOutput =
-          !stringBuffer
-              && safeReRejection instanceof IndexOutOfBoundsException
-              && jdkRejection instanceof IndexOutOfBoundsException;
-      if (rolledBack || partialBuilderOutput) {
-        assertSame(
-            "appendReplacement destination after rejection", safeRe.toString(), jdk.toString());
+      String operation = "appendReplacement destination after rejection";
+      if (safeReRejection instanceof IllegalArgumentException
+          && jdkRejection instanceof IllegalArgumentException) {
+        assertSame(operation, safeRe.toString(), jdk.toString());
+      } else if (safeReRejection instanceof IndexOutOfBoundsException
+          && jdkRejection instanceof IndexOutOfBoundsException) {
+        if (!stringBuffer) {
+          assertSame(operation, safeRe.toString(), jdk.toString());
+        } else if (!safeRe.isEmpty()) {
+          throw divergence(
+              operation + " (SafeRE StringBuffer model)",
+              lastReplacement,
+              safeRe.toString(),
+              "unchanged destination; JDK retained " + javaStringLiteral(jdk.toString()));
+        }
       }
     }
 
