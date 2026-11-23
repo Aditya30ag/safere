@@ -63,6 +63,12 @@ leak their writes into that result. Compiler transformations involving nested,
 nullable, lazy, or bounded repetitions need capture-aware tests, including a
 suffix that forces the engine to abandon a path.
 
+Matcher-free Boolean searches can use a flattened DFA to prove existence for
+nullable-loop programs. The existence DFA can stop at any accepting state.
+Existence and prioritized DFAs keep separate state caches so acceptance metadata
+cannot change prioritized results. A Boolean search exposes no witness bounds or
+captures.
+
 Deferred extraction may fill unresolved captures for an already selected match.
 It must preserve match identity and use the same input, pattern, region, bounds,
 and priority as the original search. Public `group`, replacement, and snapshot
