@@ -32,6 +32,9 @@ comparisons use `FuzzSupport` and inherit its limitations listed below.
 
 ## Shared exploratory comparator boundaries
 
+`UnsupportedSyntaxTest` enumerates rejection cases and checks supported controls
+with both engines during the regular test build.
+
 - Both engines rejecting syntax ends the comparison. SafeRE compiler-size
   rejection remains excluded as a workload limit. Other one-sided rejections,
   including unsupported syntax, are findings; no lexical recognizer suppresses

@@ -60,9 +60,15 @@ bounds for other engines or repeated-find workloads.
 
 ## Existing targets retained for exploration
 
-These targets keep their input decoding and saved seeds. Mixed checks remain
-callable there to preserve seed meaning; the extracted property entry points
-reuse the same assertions without invoking the broad differential paths.
+`CaptureSemanticsFuzzer` tracks whether each immediate operand can consume.
+A wrapped zero-count repetition is zero-width even when its child can consume.
+A directly quantified consuming operand takes an ordinary modifier. A counted
+repeat following a quantifier has a separate implicit empty operand.
+
+`UnsupportedSyntaxTest` enumerates lookaround, atomic groups, backreferences,
+consuming possessive quantifiers and `\C` in composed patterns. It checks the
+`PatternSyntaxException` diagnostic and runs quoted, literal-mode and
+comment-hidden controls with ASCII, BMP and supplementary prefixes.
 
 | Target | Generated surface / oracle | Disposition |
 | --- | --- | --- |
@@ -82,10 +88,10 @@ reuse the same assertions without invoking the broad differential paths.
 | `UnicodeFuzzer` | Unicode-biased patterns and subjects | Broad |
 | `Utf8InputFuzzer` | Focused JDK comparisons, representation properties, arbitrary byte windows | Mixed, conservatively broad; property and robustness checks separately enrolled |
 
-Capture and replacement-output waivers have been removed. Parser-marked
-intentional class-syntax rejection and unsupported-feature rejection are also
-reported as findings. No pattern-text recognizer suppresses unsupported syntax.
-Compiler-budget compile exclusions remain confined to exploratory `FuzzSupport`.
+Capture and replacement-output differences remain findings, as do intentional
+class-syntax differences. Unrestricted pattern text may still produce dialect
+differences. The compiler-budget exclusion applies only to compile comparisons
+that allow rejection.
 The whole-input grapheme waiver is also removed. The #931/#933 exhausted-state
 oracle exception remains with an observed-state predicate and a change-detecting
 canary; it never exempts replacement output. Neither compiler-budget handling
@@ -129,10 +135,10 @@ these remain generated exploratory findings but are not unconditional agreement
 probes run for every input. Compatible spellings remain fixed differential probes.
 `IntentionalReproductionTest` replays it independently and requires review when
 outcomes change. These are not passing fuzz seeds and never suppress other inputs.
-`FuzzSupportTest` pins rejection and visible findings for unsupported syntax,
-including comments-separated possessive modifiers and the numeric backreference
-spellings formerly run as fixed agreement probes. Quoted and literal-mode controls
-still compile and compare normally.
+`UnsupportedSyntaxTest` checks rejection across features, contexts and trivia.
+It also verifies that a rejection check fails when SafeRE accepts the pattern.
+`FuzzSupportTest` verifies that unrestricted acceptance still reports compile
+differences.
 
 ## Graduation and retained coverage
 
@@ -148,9 +154,10 @@ alternation priority and greedy/lazy whole-match selection (`a+?b?`,
 a harness test verifies it is reported when passed to the strict comparator.
 Grapheme, arbitrary flags and unrestricted capture/state combinations remain
 exploratory or model domains. Unicode subjects and selected regions/state sequences
-now have strict coverage; that does not graduate all Unicode or region behavior. Existing regression
-seeds retain their original target and decoding. New targets have separate
-corpora and identities.
+now have strict coverage; that does not graduate all Unicode or region behavior.
+The former newline-separated quantified-capture examples now run as explicit
+cases in `SemanticDomainTest`. Use the original run commit to decode archived
+raw inputs for the changed parser, escape, and capture generators.
 
 No claim is made that the smaller hosted differential domain retains all prior
 bug detection or code coverage. Deterministic enumeration and controlled
