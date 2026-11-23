@@ -175,18 +175,23 @@ final class StringInputScanner implements InputScanner {
   /**
    * Returns the first index at or after {@code start} of any of {@code chars}, or {@code -1}.
    *
-   * <p>{@code chars} holds the one to three members of a {@link CharClassScanInfo.SmallSet}. None
-   * is a surrogate, so a code-unit search finds exactly the code points in the set. This is the
-   * small-set search for repeated {@code find()} calls on the {@code String} path: the scanner and
-   * the start accelerator both use it, so both keep the work bound below.
+   * <p>{@code chars} holds up to three members of a {@link CharClassScanInfo.SmallSet}, or up to
+   * eight ASCII literal initials for {@link LiteralAlternation}. None is a surrogate, so a
+   * code-unit search finds exactly the code points in the set. This is the small-set search for
+   * repeated {@code find()} calls on the {@code String} path: the scanner and the start accelerator
+   * both use it, so both keep the work bound below.
    */
   static int indexOfSmallSet(String text, char[] chars, int start) {
-    int length = text.length();
+    return indexOfSmallSet(text, chars, start, text.length());
+  }
+
+  /** Searches up to the exclusive String offset {@code end}. */
+  static int indexOfSmallSet(String text, char[] chars, int start, int end) {
     int position = Math.max(0, start);
-    if (position >= length) {
+    if (position >= end) {
       return -1;
     }
-    int scalarEnd = position + Math.min(SMALL_SET_SCALAR_PROLOGUE, length - position);
+    int scalarEnd = position + Math.min(SMALL_SET_SCALAR_PROLOGUE, end - position);
     for (; position < scalarEnd; position++) {
       if (WorkCounterConfig.ENABLED) {
         WorkCounter.record();
@@ -195,25 +200,29 @@ final class StringInputScanner implements InputScanner {
         return position;
       }
     }
-    return indexOfSmallSetAfterPrologue(text, chars, position);
+    return indexOfSmallSetAfterPrologue(text, chars, position, end);
   }
 
   /**
-   * The windowed part of {@link #indexOfSmallSet}, kept out of line. The prologue above is inlined
-   * into the DFA's start-acceleration call; inlining the whole search there as well doubled the
-   * cost of a full-width citation {@code replaceAll} on 64 KiB of non-matching text, though the
-   * windowed part never ran.
+   * The windowed part of the small-set search, kept out of line. The prologue above is inlined into
+   * the DFA's start-acceleration call; inlining the whole search there as well doubled the cost of
+   * a full-width citation {@code replaceAll} on 64 KiB of non-matching text, though the windowed
+   * part never ran.
    */
-  private static int indexOfSmallSetAfterPrologue(String text, char[] chars, int position) {
-    int length = text.length();
-    if (position >= length) {
+  private static int indexOfSmallSetAfterPrologue(
+      String text, char[] chars, int position, int end) {
+    if (position >= end) {
       return -1;
     }
     if (chars.length == 1) {
-      // A single member needs no bound: a hit advances past all scanned units; a miss ends search.
-      int candidate = text.indexOf(chars[0], position);
+      // A single member needs no windows: a hit advances past all scanned units and a miss ends
+      // the search.
+      int candidate =
+          end == text.length()
+              ? text.indexOf(chars[0], position)
+              : text.indexOf(chars[0], position, end);
       if (WorkCounterConfig.ENABLED) {
-        WorkCounter.record(candidate >= 0 ? candidate - position + 1 : length - position);
+        WorkCounter.record(candidate >= 0 ? candidate - position + 1 : end - position);
       }
       return candidate;
     }
@@ -224,11 +233,12 @@ final class StringInputScanner implements InputScanner {
     // scan a full-sized window for an absent member. Reset to 64 on each call and double after
     // misses, up to the cap. Failed windows are disjoint; the final window is at most the distance
     // already scanned in this call plus 64. Thus overrun past a match is bounded by distance
-    // advanced plus 64, giving at most k * (2n + 64m) work for k <= 3 members and m consuming
-    // matches across n input units. Since m <= n, repeated find() work stays linear.
+    // advanced plus 64. Each window issues up to k bounded indexOf calls, giving at most
+    // k * (2n + 64m) work for k <= 8 members and m consuming matches across n input units.
+    // Since m <= n, repeated find() work stays linear.
     int windowLength = SMALL_SET_INITIAL_SEARCH_WINDOW;
-    while (position < length) {
-      int windowEnd = position + Math.min(windowLength, length - position);
+    while (position < end) {
+      int windowEnd = position + Math.min(windowLength, end - position);
       int searchEnd = windowEnd;
       int best = -1;
       for (char target : chars) {

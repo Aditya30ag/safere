@@ -7,7 +7,20 @@ package org.safere;
 
 import static java.nio.charset.StandardCharsets.US_ASCII;
 
-/** Complete, ordered literal alternatives for a bounded String and UTF-8 search fast path. */
+import java.util.Arrays;
+
+/**
+ * Complete, ordered literal alternatives for a bounded String and UTF-8 search fast path.
+ *
+ * <p>String searches with up to three distinct initial characters use per-literal windows. With
+ * more initials, whole-String searches hop between candidates after the first window and return to
+ * windowed search for dense candidates. String regions use the first-character scan to skip
+ * candidate-free stretches and verify matches in short per-literal windows.
+ *
+ * <p>UTF-8 searches use an exact first-byte accelerator when one is available. The default provider
+ * can also scan a compact enclosing range on longer inputs. Dense range candidates near the start
+ * fall back to the DFA. The vector provider can use Vector Teddy.
+ */
 final class LiteralAlternation {
   static final long NO_MATCH = -1;
   static final long FALLBACK = -2;
@@ -15,18 +28,22 @@ final class LiteralAlternation {
   private static final int MAX_ALTERNATIVES = 8;
   private static final int WINDOW_LENGTH = 256;
   private static final int MAX_LITERAL_LENGTH = 12;
-  // The UTF-8 search verifies first-byte candidates one at a time until it sees this many within
-  // DENSE_CANDIDATE_SPAN bytes, then switches to one bounded scan per literal.
+  private static final int REGION_PROBE_DELAY = 2 * WINDOW_LENGTH;
+  // Searches verify first-byte candidates one at a time until they see this many within
+  // DENSE_CANDIDATE_SPAN bytes, then switch to one bounded scan per literal.
   private static final int DENSE_CANDIDATES = 8;
   private static final int DENSE_CANDIDATE_SPAN = 256;
 
   private final String[] literals;
   private final boolean wholeInputRejection;
+  private final char[] firstChars;
+  private final int firstLow;
+  private final int firstHigh;
   // The literals are ASCII, so their UTF-8 encodings are their chars as bytes.
   private final byte[][] utf8Literals;
   private final int[][] utf8Failures;
-  // The first-byte scan that UTF-8 searches without this plan start with, or null when they use
-  // something else; the UTF-8 search is then off.
+  // Reuse the ordinary first-byte scan when present. Otherwise default-provider searches use a
+  // compact enclosing range or bounded per-literal scans; vector searches retain their own plan.
   private final Utf8StartAccelerator.CharClass utf8FirstByteScan;
 
   private LiteralAlternation(
@@ -35,6 +52,25 @@ final class LiteralAlternation {
       Utf8StartAccelerator.CharClass utf8FirstByteScan) {
     this.literals = literals;
     this.wholeInputRejection = wholeInputRejection;
+    char[] initials = new char[literals.length];
+    int count = 0;
+    int low = 127;
+    int high = 0;
+    for (String literal : literals) {
+      char first = literal.charAt(0);
+      boolean seen = false;
+      for (int i = 0; i < count; i++) {
+        seen |= initials[i] == first;
+      }
+      if (!seen) {
+        initials[count++] = first;
+      }
+      low = Math.min(low, first);
+      high = Math.max(high, first);
+    }
+    this.firstChars = Arrays.copyOf(initials, count);
+    this.firstLow = low;
+    this.firstHigh = high;
     this.utf8Literals = new byte[literals.length][];
     this.utf8Failures = new int[literals.length][];
     for (int i = 0; i < literals.length; i++) {
@@ -46,10 +82,9 @@ final class LiteralAlternation {
 
   /**
    * Caller must have ruled out explicit captures. {@code utf8FirstByteScan} is the UTF-8 start
-   * accelerator when it scans for the literals' first bytes, or null. Only then is the UTF-8 search
-   * used: otherwise UTF-8 searches use either a vector multi-literal search, which is faster, or
-   * the DFA from the start, which with several first bytes is about as fast as several literal
-   * scans.
+   * accelerator when it scans for the literals' first bytes, or null. Vector multi-literal plans
+   * retain their existing search; the default provider can select the ordered literal search even
+   * when there are too many first bytes for ordinary start acceleration.
    */
   static LiteralAlternation compile(
       Regexp ast, boolean wholeInputRejection, Utf8StartAccelerator.CharClass utf8FirstByteScan) {
@@ -86,49 +121,47 @@ final class LiteralAlternation {
     if (from != 0) {
       return FALLBACK;
     }
-    int length = text.length();
+    int end = text.length();
+    if (firstChars.length > 3) {
+      int limit = Math.min(WINDOW_LENGTH, end);
+      long match = search(text, 0, limit, end);
+      return match >= 0 || limit == end ? match : searchCandidates(text, limit);
+    }
     if (!wholeInputRejection) {
-      // Preserve locality for patterns that did not already scan the whole input for rejection.
-      for (int start = 0; start < length; ) {
-        int limit = start + Math.min(WINDOW_LENGTH, length - start);
-        long match = search(text, start, limit);
-        if (match >= 0) {
-          return match;
-        }
-        start = limit;
-      }
-      return NO_MATCH;
+      return searchFixedWindows(text, 0, end);
     }
-    if (length <= PROBE_LENGTH * 4) {
-      return search(text, from, length);
+    if (end <= PROBE_LENGTH * 4) {
+      return search(text, 0, end, end);
     }
-    long match = search(text, from, PROBE_LENGTH);
-    return match >= 0 ? match : searchGrowingWindows(text, PROBE_LENGTH, PROBE_LENGTH * 2);
+    long match = search(text, 0, PROBE_LENGTH, end);
+    return match >= 0 ? match : searchGrowingWindows(text, PROBE_LENGTH, end, PROBE_LENGTH * 2);
   }
 
-  /** Searches an opaque String region without inspecting text beyond its bounds. */
-  long find(StringRegionInputScanner text, int from) {
+  /** Searches an opaque String region and returns region-relative bounds. */
+  long find(StringRegionInputScanner region, int from) {
     if (from != 0) {
       return FALLBACK;
     }
-    int length = text.length();
-    for (int start = 0; start < length; ) {
-      int limit = start + Math.min(WINDOW_LENGTH, length - start);
-      int bestStart = limit;
-      int bestEnd = -1;
-      for (String literal : literals) {
-        int end = bestStart + Math.min(literal.length() - 1, length - bestStart);
-        int candidate = text.indexOf(literal, start, end);
-        if (candidate >= 0 && candidate < bestStart) {
-          bestStart = candidate;
-          bestEnd = candidate + literal.length();
-          if (candidate == start) {
-            break;
-          }
-        }
-      }
-      if (bestEnd >= 0) {
-        return ((long) bestStart << 32) | bestEnd;
+    int start = region.offset();
+    int end = start + region.length();
+    long match =
+        firstChars.length > 3
+            ? searchRegionWithSkips(region.text(), start, end)
+            : searchFixedWindows(region.text(), start, end);
+    if (match < 0) {
+      return match;
+    }
+    int matchStart = (int) (match >>> 32) - start;
+    int matchEnd = (int) match - start;
+    return ((long) matchStart << 32) | matchEnd;
+  }
+
+  private long searchFixedWindows(String text, int start, int end) {
+    while (start < end) {
+      int limit = start + Math.min(WINDOW_LENGTH, end - start);
+      long match = search(text, start, limit, end);
+      if (match >= 0) {
+        return match;
       }
       start = limit;
     }
@@ -136,46 +169,138 @@ final class LiteralAlternation {
   }
 
   /**
-   * UTF-8 counterpart to {@link #find(String, int)}, returning byte offsets. ASCII literals only
-   * match ASCII bytes, so a match never splits a code point, even in malformed input.
-   *
-   * <p>Every match starts with one of the literals' first bytes, so this hops between those bytes
-   * with the fallback's own first-byte scan and checks the literals at each one, without starting
-   * the DFA. When the first bytes are common, that stops at almost every word, so after {@link
-   * #DENSE_CANDIDATES} candidates within {@link #DENSE_CANDIDATE_SPAN} bytes it switches to the
-   * String path's strategy of one bounded scan per literal. Those scans start with {@link
-   * #PROBE_LENGTH}-byte windows, long enough for the word-at-a-time literal filter.
+   * Uses the character scan to skip candidate-free stretches, leaving verification to the regular
+   * short windows. If two probes in a row find a nearby candidate, finish with the ordinary
+   * windowed search. A distant candidate pays for another probe, so check only that start.
    */
-  long find(Utf8InputScanner text, int from) {
-    if (from != 0 || utf8FirstByteScan == null) {
-      return FALLBACK;
-    }
-    byte[] bytes = text.bytes();
-    int offset = text.offset();
-    int length = text.length();
-    int spanStart = 0;
-    int candidates = 0;
-    for (int position = 0; ; position++) {
-      int candidate = utf8FirstByteScan.findCandidate(text, position);
-      if (WorkCounterConfig.ENABLED) {
-        WorkCounter.record((candidate < 0 ? length : candidate + 1) - position);
+  private long searchRegionWithSkips(String text, int start, int end) {
+    // Favor nearby matches with two ordinary windows before sampling the region.
+    int nextProbe = start + Math.min(REGION_PROBE_DELAY, end - start);
+    boolean previousCandidateNearby = false;
+    while (start < end) {
+      if (start == nextProbe) {
+        if (end - start < WINDOW_LENGTH) {
+          return searchFixedWindows(text, start, end);
+        }
+        int candidate = StringInputScanner.indexOfSmallSet(text, firstChars, start, end);
+        if (candidate < 0) {
+          return NO_MATCH;
+        }
+        boolean nearby = candidate - start < WINDOW_LENGTH;
+        if (nearby && previousCandidateNearby) {
+          return searchFixedWindows(text, start, end);
+        }
+        previousCandidateNearby = nearby;
+        start = candidate;
+        int width = nearby ? WINDOW_LENGTH : 1;
+        nextProbe = start + Math.min(width, end - start);
       }
+      int limit = start + Math.min(WINDOW_LENGTH, nextProbe - start);
+      long match = search(text, start, limit, end);
+      if (match >= 0) {
+        return match;
+      }
+      start = limit;
+    }
+    return NO_MATCH;
+  }
+
+  /** Candidate starts advance monotonically, including on a switch to windowed search. */
+  private long searchCandidates(String text, int start) {
+    int end = text.length();
+    int spanStart = start;
+    int candidates = 0;
+    for (int position = start; ; ) {
+      int candidate = StringInputScanner.indexOfSmallSet(text, firstChars, position);
       if (candidate < 0) {
         return NO_MATCH;
       }
+      for (String literal : literals) {
+        if (WorkCounterConfig.ENABLED) {
+          WorkCounter.record(literal.length());
+        }
+        if (text.startsWith(literal, candidate)) {
+          return ((long) candidate << 32) | (candidate + literal.length());
+        }
+      }
+      position = candidate + 1;
+      if (++candidates == DENSE_CANDIDATES) {
+        if (candidate - spanStart < DENSE_CANDIDATE_SPAN) {
+          return searchGrowingWindows(text, position, end, PROBE_LENGTH);
+        }
+        candidates = 0;
+        spanStart = candidate;
+      }
+    }
+  }
+
+  /**
+   * UTF-8 counterpart to {@link #find(String, int)}, returning byte offsets. ASCII literals only
+   * match ASCII bytes, so a match never splits a code point, even in malformed input.
+   *
+   * <p>Every match starts with one of the literals' first bytes. Reuse the fallback's first-byte
+   * scan when available; the default provider can also scan a compact enclosing range. Check
+   * literals in priority order at every candidate. After {@link #DENSE_CANDIDATES} candidates
+   * within {@link #DENSE_CANDIDATE_SPAN} bytes, a dense range near the start falls back to the DFA.
+   * Other dense candidates switch to the String path's strategy of one bounded scan per literal,
+   * starting with {@link #PROBE_LENGTH}-byte windows for the word-at-a-time literal filter.
+   */
+  long find(Utf8InputScanner text, int from) {
+    if (from != 0) {
+      return FALLBACK;
+    }
+    boolean scanRange = utf8FirstByteScan == null;
+    int length = text.length();
+    byte[] bytes = text.bytes();
+    int offset = text.offset();
+    if (scanRange
+        && (VectorScanProviders.vectorProviderAvailable()
+            || length < WINDOW_LENGTH
+            || firstHigh - firstLow > 31)) {
+      return FALLBACK;
+    }
+
+    int candidate = findUtf8Candidate(text, 0);
+    if (candidate < 0) {
+      return NO_MATCH;
+    }
+    // Count density from the first candidate when using the enclosing range.
+    int spanStart = scanRange ? candidate : 0;
+    int candidates = 0;
+    do {
       long match = matchAt(bytes, offset, length, candidate);
       if (match >= 0) {
         return match;
       }
-      position = candidate;
+      int position = candidate + 1;
       if (++candidates == DENSE_CANDIDATES) {
-        if (position - spanStart < DENSE_CANDIDATE_SPAN) {
-          return searchFrom(text, position + 1);
+        if (candidate - spanStart < DENSE_CANDIDATE_SPAN) {
+          // For a dense range near the start, retry with the DFA. The retried prefix is
+          // bounded by the admission window plus one density span.
+          if (scanRange && spanStart < WINDOW_LENGTH) {
+            return FALLBACK;
+          }
+          return searchFrom(text, position);
         }
         candidates = 0;
-        spanStart = position;
+        spanStart = candidate;
       }
+      candidate = findUtf8Candidate(text, position);
+    } while (candidate >= 0);
+    return NO_MATCH;
+  }
+
+  private int findUtf8Candidate(Utf8InputScanner text, int position) {
+    Utf8StartAccelerator.CharClass firstByteScan = utf8FirstByteScan;
+    int candidate =
+        firstByteScan != null
+            ? firstByteScan.findCandidate(text, position)
+            : ByteSwarScan.indexOfByteRange(
+                text.bytes(), text.offset(), text.length(), firstLow, firstHigh, position);
+    if (WorkCounterConfig.ENABLED) {
+      WorkCounter.record((candidate < 0 ? text.length() : candidate + 1) - position);
     }
+    return candidate;
   }
 
   /** Returns the bounds of the highest-priority literal starting at {@code position}, or -1. */
@@ -238,35 +363,37 @@ final class LiteralAlternation {
     return bestEnd < 0 ? NO_MATCH : ((long) bestStart << 32) | bestEnd;
   }
 
-  private long searchGrowingWindows(String text, int start, int windowLength) {
-    int length = text.length();
-    while (start < length) {
-      int remaining = length - start;
+  private long searchGrowingWindows(String text, int start, int end, int windowLength) {
+    while (start < end) {
+      int remaining = end - start;
       int width = Math.min(windowLength, remaining);
       // Combine a small final remainder with this window, avoiding another range search.
-      int limit = remaining - width <= PROBE_LENGTH * 4 ? length : start + width;
-      long match = search(text, start, limit);
+      int limit = remaining - width <= PROBE_LENGTH * 4 ? end : start + width;
+      long match = search(text, start, limit, end);
       if (match >= 0) {
         return match;
       }
       start = limit;
       // Candidate-start ranges do not overlap. search() includes the literal-length overlap
       // needed for crossing matches; long arithmetic keeps growth safe at String's size limit.
-      windowLength = (int) Math.min(2L * windowLength, length - start);
+      windowLength = (int) Math.min(2L * windowLength, end - start);
     }
     return NO_MATCH;
   }
 
-  /** Search literal starts in [from, limit), including literals crossing the upper boundary. */
-  private long search(String text, int from, int limit) {
+  /** Searches literal starts in [from, limit), allowing matches to end at or before {@code end}. */
+  private long search(String text, int from, int limit, int end) {
     int bestStart = limit;
     int bestEnd = -1;
     int length = text.length();
     for (String literal : literals) {
-      int end = bestStart + Math.min(literal.length() - 1, length - bestStart);
-      int idx = end == length ? text.indexOf(literal, from) : text.indexOf(literal, from, end);
+      int searchEnd = bestStart + Math.min(literal.length() - 1, end - bestStart);
+      int idx =
+          searchEnd == length
+              ? text.indexOf(literal, from)
+              : text.indexOf(literal, from, searchEnd);
       if (WorkCounterConfig.ENABLED) {
-        WorkCounter.record(idx >= 0 ? idx - from + literal.length() : end - from);
+        WorkCounter.record(idx >= 0 ? idx - from + literal.length() : searchEnd - from);
       }
       if (idx >= 0 && idx < bestStart) {
         bestStart = idx;

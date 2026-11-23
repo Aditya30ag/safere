@@ -81,7 +81,12 @@ class LiteralAlternationWorkTest {
         "The UTF-8 literal search is off when the vector Teddy scan is available");
     // "ab " starts two of the literals often enough for the UTF-8 literal search to run.
     for (String regex :
-        new String[] {"apple|banana|cherry", "blossom|sparkling|gardens", "ab|cherry|abc"}) {
+        new String[] {
+          "apple|banana|cherry",
+          "blossom|sparkling|gardens",
+          "ab|cherry|abc",
+          "north|south|east|west|upper|lower"
+        }) {
       Pattern pattern = Pattern.compile(regex);
       String filler = regex.startsWith("ab|") ? "aa bb " : "ab bc ";
       long shorter = utf8Work(pattern, filler.repeat(5_000), false);
@@ -96,6 +101,77 @@ class LiteralAlternationWorkTest {
         assertThat(late).as("%s at %s", regex, offset).isLessThanOrEqualTo(early * 2);
       }
     }
+  }
+
+  @Test
+  void manyInitialsKeepSparseAndDenseSearchesLinearAndLocal() {
+    Pattern pattern = Pattern.compile("north|south|east|west|upper|lower|front|back");
+    for (String filler : new String[] {"x", "n s e w u l f b ", "日本語😀"}) {
+      String shorter = filler.repeat(2_000);
+      String longer = filler.repeat(8_000);
+      long shortMiss =
+          WorkCounter.countForTesting(() -> assertThat(pattern.matcher(shorter).find()).isFalse());
+      long longMiss =
+          WorkCounter.countForTesting(() -> assertThat(pattern.matcher(longer).find()).isFalse());
+      assertThat(shortMiss).isPositive();
+      assertThat(longMiss).as(filler).isLessThanOrEqualTo(shortMiss * 6);
+      assertThat(utf8Work(pattern, longer, false))
+          .as(filler)
+          .isLessThanOrEqualTo(utf8Work(pattern, shorter, false) * 6);
+      for (int offset : new int[] {255, 256, 1_024, 4_096}) {
+        String prefix = filler.repeat(offset) + "back";
+        assertThat(work(pattern, prefix + filler.repeat(100_000)))
+            .as("%s at %s", filler, offset)
+            .isLessThanOrEqualTo(work(pattern, prefix + filler.repeat(8_000)) * 2);
+        assertThat(utf8Work(pattern, prefix + filler.repeat(100_000), true))
+            .as("%s at %s", filler, offset)
+            .isLessThanOrEqualTo(utf8Work(pattern, prefix + filler.repeat(8_000), true) * 2);
+      }
+    }
+  }
+
+  @Test
+  void regionSearchWorkIsIndependentOfTheBackingStringTail() {
+    Pattern pattern = Pattern.compile("north|south|east|west|upper|lower|front|back");
+    for (String filler : new String[] {"x", "n"}) {
+      String text = "north " + filler.repeat(4_096) + "back";
+      int regionEnd = text.length() - 1;
+      Matcher small = pattern.matcher(text).region(6, regionEnd);
+      Matcher large = pattern.matcher(text + "x".repeat(1_048_576)).region(6, regionEnd);
+      long smallWork = WorkCounter.countForTesting(() -> assertThat(small.find()).isFalse());
+      long largeWork = WorkCounter.countForTesting(() -> assertThat(large.find()).isFalse());
+      assertThat(smallWork).isPositive();
+      assertThat(largeWork).as(filler).isEqualTo(smallWork);
+    }
+  }
+
+  @Test
+  void regionSearchAmortizesTheCostOfModeratelySpacedFalseCandidates() {
+    Pattern pattern = Pattern.compile("north|south|east|west|upper|lower|front|back");
+    String region = "x".repeat(288) + ("b" + "x".repeat(32)).repeat(1_000);
+    String text = "north!" + region + "back";
+    Matcher matcher = pattern.matcher(text).region(6, 6 + region.length());
+    long work = WorkCounter.countForTesting(() -> assertThat(matcher.find()).isFalse());
+    // Eight per-literal passes plus window overlap and occasional initial scans fit this budget.
+    // Restarting the small-set search and verification at every false start exceeds it.
+    assertThat(work).isPositive().isLessThanOrEqualTo(10L * region.length());
+  }
+
+  @Test
+  void regionSearchKeepsLinearWorkWhenNearbyAndDistantCandidatesAlternate() {
+    Pattern pattern = Pattern.compile("north|south|east|west|upper|lower|front|back");
+    // The first candidate in each pair is distant. The second is in the next position.
+    // This alternates the two skip decisions without triggering fixed-window fallback.
+    String segment = "x".repeat(512) + "bb";
+    long shorter = regionMissWork(pattern, segment.repeat(100));
+    long longer = regionMissWork(pattern, segment.repeat(400));
+    assertThat(shorter).isPositive();
+    assertThat(longer).isLessThanOrEqualTo(shorter * 5);
+  }
+
+  private static long regionMissWork(Pattern pattern, String region) {
+    Matcher matcher = pattern.matcher("north!" + region + "back").region(6, 6 + region.length());
+    return WorkCounter.countForTesting(() -> assertThat(matcher.find()).isFalse());
   }
 
   private static long work(Pattern pattern, String text) {

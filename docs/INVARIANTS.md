@@ -58,10 +58,22 @@ are already unguarded paths, so the languages coincide. This proof permits
 `matches()` to publish the fixed whole-region bounds, but says nothing about
 which prioritized prefix, search result, or capture vector wins.
 
+A successful flattened DFA search can defer exact selection for a full-input
+`find()`. The exact engine resumes from the original search lower bound with
+the same input and assertion context. The DFA endpoint is only a sizing hint.
+Resolving bounds or continuing the search performs the exact selection once
+without replaying the DFA search.
+
 Capture results belong to the selected prioritized path. Losing paths must not
 leak their writes into that result. Compiler transformations involving nested,
 nullable, lazy, or bounded repetitions need capture-aware tests, including a
 suffix that forces the engine to abandon a path.
+
+Matcher-free Boolean searches can use a flattened DFA to prove existence for
+nullable-loop programs. The existence DFA can stop at any accepting state.
+Existence and prioritized DFAs keep separate state caches so acceptance metadata
+cannot change prioritized results. A Boolean search exposes no witness bounds or
+captures.
 
 Deferred extraction may fill unresolved captures for an already selected match.
 It must preserve match identity and use the same input, pattern, region, bounds,
@@ -89,6 +101,18 @@ A successful filter is not proof of an exact match. DFA rejection, start
 detection, group-zero bounds, and capture extraction have separate capability
 requirements. Fast paths need semantic eligibility checks as well as size or
 performance checks.
+
+An assertion-free reverse DFA without progress registers recognizes the exact
+reversed language. An unambiguous leftmost start and a single legal terminal
+endpoint therefore establish group-zero bounds; inner captures still require
+the exact engine. Matcher and matcher-free searches share this proof, independent
+of candidate length. Unproved candidates share a forward-verification eligibility
+gate before BitState/NFA fallback. A reverse accepting state may skip unread
+prefix input only when every code-point equivalence class returns to the identical
+frontier and no assertion or progress state depends on the skipped context.
+Derived language-proof flags must be excluded from semantic state-cache keys and
+regenerated with states after a cache reset. Skipped input must not count as
+scanned progress toward a DFA cache-reset budget.
 
 Disabling an optimization must preserve the observable API trace: booleans,
 bounds, captures, snapshots, replacement output, and later searches.
@@ -124,6 +148,13 @@ Clearing a result does not necessarily reset the next-search cursor.
 - Match snapshots must remain independent of subsequent matcher mutation.
 - Result streams and functional replacements must detect prohibited callback
   mutation under their API contract.
+
+The `\G` assertion compares against a position fixed for the entire operation. Successful
+operations establish the next boundary; empty-match cursor advancement does not move it.
+Initial/reset searches use the region beginning, while `find(int)` uses its explicit start.
+Engine input views translate the boundary into their own coordinates. Patterns containing
+`\G` use exact NFA/BitState execution and eager captures; DFA, OnePass, and deferred
+capture paths remain ineligible until they carry the same assertion context.
 
 Empty-match progress depends on the representation: String matching uses Java
 indices, while UTF-8 matching advances at scalar boundaries. Test terminal empty
