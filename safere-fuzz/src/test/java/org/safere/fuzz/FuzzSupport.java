@@ -546,9 +546,9 @@ final class FuzzSupport {
     }
 
     /**
-     * After both engines reject a replacement, checks the destinations, which both start empty.
-     * OpenJDK rolls back an {@link IllegalArgumentException}, so both destinations must be
-     * unchanged. Both JDK overloads keep the partial output on an {@link
+     * After both engines reject a replacement, checks the exception category and the destinations,
+     * which both start empty. OpenJDK rolls back an {@link IllegalArgumentException}, so both
+     * destinations must be unchanged. Both JDK overloads keep the partial output on an {@link
      * IndexOutOfBoundsException}. SafeRE matches that for {@link StringBuilder}. Its {@link
      * StringBuffer} overload expands into a temporary builder and leaves the destination unchanged,
      * so that case is checked against this SafeRE model instead of the JDK.
@@ -560,21 +560,23 @@ final class FuzzSupport {
       if (!jdkOracleAvailable || safeReRejection == null || jdkRejection == null) {
         return;
       }
+      boolean outOfBounds = jdkRejection instanceof IndexOutOfBoundsException;
+      if (outOfBounds != (safeReRejection instanceof IndexOutOfBoundsException)) {
+        throw divergence(
+            "appendReplacement exception category",
+            lastReplacement,
+            safeReRejection.getClass().getSimpleName(),
+            jdkRejection.getClass().getSimpleName());
+      }
       String operation = "appendReplacement destination after rejection";
-      if (safeReRejection instanceof IllegalArgumentException
-          && jdkRejection instanceof IllegalArgumentException) {
+      if (!stringBuffer || !outOfBounds) {
         assertSame(operation, safeRe.toString(), jdk.toString());
-      } else if (safeReRejection instanceof IndexOutOfBoundsException
-          && jdkRejection instanceof IndexOutOfBoundsException) {
-        if (!stringBuffer) {
-          assertSame(operation, safeRe.toString(), jdk.toString());
-        } else if (!safeRe.isEmpty()) {
-          throw divergence(
-              operation + " (SafeRE StringBuffer model)",
-              lastReplacement,
-              safeRe.toString(),
-              "unchanged destination; JDK retained " + javaStringLiteral(jdk.toString()));
-        }
+      } else if (!safeRe.isEmpty()) {
+        throw divergence(
+            operation + " (SafeRE StringBuffer model)",
+            lastReplacement,
+            safeRe.toString(),
+            "unchanged destination; JDK retained " + javaStringLiteral(jdk.toString()));
       }
     }
 
