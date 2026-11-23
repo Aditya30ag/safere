@@ -433,11 +433,17 @@ public final class Matcher implements MatchResult {
 
   private boolean groupZeroResolved = true;
 
-  /** Stashed match boundaries for deferred capture resolution. */
+  // Match bounds for deferred capture resolution. For a deferred find, these instead hold
+  // the original search lower bound and an end hint for exact selection.
   private int deferredMatchStart;
-
   private int deferredMatchEnd;
   private boolean deferredEndMatch;
+
+  // A flattened DFA proved existence for a nullable loop.
+  private boolean deferredFind;
+
+  // Reused matchers retain this signal across reset() and usePattern().
+  private boolean findBoundsObserved;
 
   /** Opaque input view retained only until the current region match is consumed or discarded. */
   private InputScanner deferredRegionScanner;
@@ -588,6 +594,7 @@ public final class Matcher implements MatchResult {
     deferredMatchStart = 0;
     deferredMatchEnd = 0;
     deferredEndMatch = false;
+    deferredFind = false;
     deferredRegionScanner = null;
     deferredRegionOffset = 0;
   }
@@ -621,7 +628,7 @@ public final class Matcher implements MatchResult {
   private void rememberPreviousMatchEnd() {
     if (hasMatch) {
       if (!groupZeroResolved) {
-        resolveCaptures();
+        resolveMatchBounds();
       }
       previousMatchEnd = groups[1];
     }
@@ -1621,7 +1628,7 @@ public final class Matcher implements MatchResult {
 
   private boolean advanceSearchPositionAfterPreviousMatch() {
     if (!groupZeroResolved) {
-      resolveCaptures();
+      resolveMatchBounds();
     }
     searchFrom = groups[1];
     if (groups[0] == groups[1]) {
@@ -2370,8 +2377,34 @@ public final class Matcher implements MatchResult {
           MatchStrategy.DFA,
           StrategyDisposition.BYPASSED,
           StrategyReason.EXACT_NULLABLE_LOOP_SEMANTICS_REQUIRED);
+      if (!regionActive
+          && diagnosticOperation == null
+          && !findBoundsObserved
+          && !replacementNeedsCaptures
+          && !parentPattern.innerCapturesObserved()
+          && options.lazyCaptureExtraction()) {
+        deferredFind = true;
+        deferredMatchStart = effectiveStart;
+        deferredMatchEnd = fwdResult.pos();
+        groupZeroResolved = false;
+        capturesResolved = false;
+        hasMatch = true;
+        resultStatus = ResultStatus.MATCHED;
+        findExhaustedAfterTerminalEmptyMatch = false;
+        return true;
+      }
     }
 
+    return selectFindWithExactEngine(
+        scanner,
+        effectiveStart,
+        !regionActive || independentRegion,
+        fwdResult != null && fwdResult.matched() ? fwdResult.pos() : -1);
+  }
+
+  private boolean selectFindWithExactEngine(
+      InputScanner scanner, int effectiveStart, boolean independentInput, int matchEndHint) {
+    Prog prog = parentPattern.prog();
     // Fallback: an exact search is already necessary. If an operation requires inner captures or
     // callers have consumed them before, collect them in this pass rather than replaying it on
     // group access. Otherwise group-zero-only loops can still defer capture tracking.
@@ -2379,12 +2412,12 @@ public final class Matcher implements MatchResult {
     // Independent region views retain the same scanner for replay; full-context regions still
     // use eager extraction.
     boolean lazyFallbackCaptures =
-        (!regionActive || independentRegion)
+        independentInput
             && !replacementNeedsCaptures
             && !parentPattern.innerCapturesObserved()
             && !prog.hasGraphemeSemantics()
             && !prog.hasPreviousMatchEnd()
-            && options.lazyCaptureExtraction()
+            && enginePathOptions().lazyCaptureExtraction()
             && prog.numCaptures() <= MAX_LAZY_FALLBACK_SUBMATCHES;
     int nsubmatch = lazyFallbackCaptures ? 1 : prog.numCaptures();
     int[] result =
@@ -2400,7 +2433,7 @@ public final class Matcher implements MatchResult {
             nsubmatch,
             false,
             this.groups,
-            fwdResult != null && fwdResult.matched() ? fwdResult.pos() : -1);
+            matchEndHint);
     if (result == null) {
       return applyFailedMatchResult();
     }
@@ -3320,11 +3353,11 @@ public final class Matcher implements MatchResult {
   public int start(int group) {
     checkMatch();
     checkGroup(group);
-    if (group != 0 || !groupZeroResolved) {
-      if (group != 0) {
-        recordInnerCaptureDemand();
-      }
+    if (group != 0) {
+      recordInnerCaptureDemand();
       resolveCaptures();
+    } else if (!groupZeroResolved) {
+      resolveMatchBounds();
     }
     return groups[2 * group];
   }
@@ -3355,11 +3388,11 @@ public final class Matcher implements MatchResult {
   public int end(int group) {
     checkMatch();
     checkGroup(group);
-    if (group != 0 || !groupZeroResolved) {
-      if (group != 0) {
-        recordInnerCaptureDemand();
-      }
+    if (group != 0) {
+      recordInnerCaptureDemand();
       resolveCaptures();
+    } else if (!groupZeroResolved) {
+      resolveMatchBounds();
     }
     return groups[2 * group + 1];
   }
@@ -3551,8 +3584,8 @@ public final class Matcher implements MatchResult {
     ReplacementSegment[] compiledTemplate = template.get();
     boolean needsCaptures = template.needsCaptures();
     do {
-      if (needsCaptures && !groupZeroResolved) {
-        resolveCaptures();
+      if (deferredFind || (needsCaptures && !groupZeroResolved)) {
+        resolveMatchBounds();
       }
       int matchStart = groupZeroResolved ? groups[0] : deferredMatchStart;
       int matchEnd = groupZeroResolved ? groups[1] : deferredMatchEnd;
@@ -4610,6 +4643,9 @@ public final class Matcher implements MatchResult {
   @Override
   public String toString() {
     String lastMatch = "";
+    if (deferredFind) {
+      resolveDeferredFind(false);
+    }
     if (hasMatch && groups[0] >= 0 && groups[1] >= groups[0]) {
       lastMatch = text.substring(groups[0], groups[1]);
     }
@@ -4641,7 +4677,7 @@ public final class Matcher implements MatchResult {
     boolean preservedGroupZero = hasMatch;
     if (hasMatch) {
       if (!groupZeroResolved) {
-        resolveCaptures();
+        resolveMatchBounds();
       }
       int prevStart = groups[0];
       int prevEnd = groups[1];
@@ -4741,6 +4777,31 @@ public final class Matcher implements MatchResult {
   // Internals
   // ---------------------------------------------------------------------------
 
+  private void resolveMatchBounds() {
+    if (deferredFind) {
+      resolveDeferredFind(true);
+    } else if (!groupZeroResolved) {
+      resolveCaptures();
+    }
+  }
+
+  private void resolveDeferredFind(boolean recordBoundsDemand) {
+    // The exact engine sees the same full input, search lower bound, and sizing hint as an eager
+    // find. Continuing the search comes through here too. A diagnostic rendering resolves the
+    // current match without changing the search policy for subsequent finds.
+    findBoundsObserved |= recordBoundsDemand;
+    // This match was produced without diagnostics. A later operation may already have started
+    // recording its own diagnostics by the time it needs the previous match's bounds.
+    DiagnosticOperation nextOperation = diagnosticOperation;
+    diagnosticOperation = null;
+    try {
+      selectFindWithExactEngine(activeScanner(), deferredMatchStart, true, deferredMatchEnd);
+      deferredFind = false;
+    } finally {
+      diagnosticOperation = nextOperation;
+    }
+  }
+
   /**
    * Resolves deferred capture groups. Called lazily when the user accesses any group (e.g., {@code
    * group(0)}, {@code start(1)}) or when a full snapshot is needed ({@code toMatchResult()}). Runs
@@ -4753,6 +4814,12 @@ public final class Matcher implements MatchResult {
   private void resolveCaptures() {
     if (capturesResolved) {
       return;
+    }
+    if (deferredFind) {
+      resolveDeferredFind(true);
+      if (capturesResolved) {
+        return;
+      }
     }
     if (deferredRegionScanner == null) {
       resolveCapturesOnInput(activeScanner());
@@ -5148,6 +5215,9 @@ public final class Matcher implements MatchResult {
       while (find()) {
         if (limit > 0 && buffer.size / 2 >= limit - 1) {
           break;
+        }
+        if (!groupZeroResolved) {
+          resolveMatchBounds();
         }
         if (buffer.size == 0 && groups[0] == 0 && groups[1] == 0) {
           continue;
