@@ -365,9 +365,10 @@ public final class Utf8Matcher {
       }
       String text = replacementInput.decode();
       int groupCount = groupCount();
-      Matcher.ReplacementSegment[] parsed = Matcher.compileReplacementTemplate(text, groupCount);
-      ReplacementSegment[] compiled = new ReplacementSegment[parsed.length];
       Map<String, Integer> namedGroups = pattern.namedGroups();
+      Matcher.ReplacementSegment[] parsed =
+          Matcher.compileReplacementTemplate(text, groupCount, namedGroups);
+      ReplacementSegment[] compiled = new ReplacementSegment[parsed.length];
       boolean needsCaptures = false;
       for (int index = 0; index < parsed.length; index++) {
         compiled[index] =
