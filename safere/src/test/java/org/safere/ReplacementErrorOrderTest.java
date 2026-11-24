@@ -56,18 +56,16 @@ class ReplacementErrorOrderTest {
             })
         .as("appendReplacement /%s/ with %s", regex, replacement)
         .isExactlyInstanceOf(expected);
-    assertThatThrownBy(
-            () ->
-                Pattern.compile(regex)
-                    .matcher(utf8(input))
-                    .replaceAll((bytes, offset, length) -> {}, utf8(replacement)))
+    assertThatThrownBy(() ->
+            Pattern.compile(regex)
+                .matcher(utf8(input))
+                .replaceAll((bytes, offset, length) -> {}, utf8(replacement)))
         .as("UTF-8 replaceAll /%s/ with %s", regex, replacement)
         .isExactlyInstanceOf(expected);
-    assertThatThrownBy(
-            () ->
-                Pattern.compile(regex)
-                    .matcher(utf8(input))
-                    .replaceFirst((bytes, offset, length) -> {}, utf8(replacement)))
+    assertThatThrownBy(() ->
+            Pattern.compile(regex)
+                .matcher(utf8(input))
+                .replaceFirst((bytes, offset, length) -> {}, utf8(replacement)))
         .as("UTF-8 replaceFirst /%s/ with %s", regex, replacement)
         .isExactlyInstanceOf(expected);
   }
