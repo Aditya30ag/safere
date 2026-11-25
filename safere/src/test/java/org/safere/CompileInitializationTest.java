@@ -171,6 +171,13 @@ class CompileInitializationTest {
         .contains("SafeRE reference bytes: " + Long.BYTES);
   }
 
+  @Test
+  void rejectingAStartRegisterProgramDoesNotReadTheCacheReferenceSize()
+      throws IOException, InterruptedException, URISyntaxException {
+    assertThat(runFreshProcess("\\Aa", "", "reject-start-register"))
+        .doesNotContain(DFA_CACHE_BUDGET_NAME);
+  }
+
   private static String runFreshProcess(String regex)
       throws IOException, InterruptedException, URISyntaxException {
     return runFreshProcess(regex, "");

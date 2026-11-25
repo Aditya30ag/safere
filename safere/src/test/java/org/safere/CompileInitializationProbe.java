@@ -38,6 +38,12 @@ public final class CompileInitializationProbe {
         }
         System.out.println("SafeRE reference bytes: " + DfaCacheBudget.REFERENCE_BYTES);
       }
+      case "reject-start-register" -> {
+        Prog prog = Pattern.compile(regex).flatDfaProg();
+        if (StartRegisterSearch.create(prog, null, null) != null) {
+          throw new AssertionError("expected the start-register search to reject the program");
+        }
+      }
       case "compile" -> Pattern.compile(regex);
       default -> throw new IllegalArgumentException(args[1]);
     }
