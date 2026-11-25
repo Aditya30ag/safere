@@ -1187,7 +1187,7 @@ public final class Pattern implements Serializable {
   }
 
   /** Returns whether the end anchor has only one eligible endpoint on this input. */
-  boolean hasUniqueEndAnchoredEndpoint(InputScanner scanner) {
+  private boolean hasUniqueEndAnchoredEndpoint(InputScanner scanner) {
     return !prog.dollarAnchorEnd()
         || scanner.trailingLineTerminatorStart(prog.dollarAnchorUnixLines(), scanner.length()) < 0;
   }
@@ -2079,22 +2079,7 @@ public final class Pattern implements Serializable {
     return onePassAnalysis().canSubmatch();
   }
 
-  /**
-   * Returns {@code true} when the DFA's leftmost-longest group(0) boundaries are guaranteed to
-   * match RE2's leftmost-first semantics. The DFA uses POSIX leftmost-longest matching which can
-   * disagree with Perl/RE2 leftmost-first semantics in three cases:
-   *
-   * <ol>
-   *   <li>Lazy quantifiers: prefer shortest match, but the DFA gives longest.
-   *   <li>Alternation: the DFA picks the longest branch, but RE2 picks the first matching branch.
-   *   <li>Bounded repetitions ({@code a{3,4}}): nested inside quantifiers, the DFA may find a
-   *       globally longer match by choosing fewer characters per iteration, while RE2 greedily
-   *       maximizes each iteration.
-   * </ol>
-   *
-   * <p>When this returns {@code false}, the DFA sandwich is skipped and the submatch engine
-   * (BitState/NFA) determines the correct match boundaries.
-   */
+  /** Returns whether the DFA can model the program's repetition semantics for group zero. */
   boolean dfaGroupZeroReliable() {
     return prog.numLoopRegs() == 0;
   }
