@@ -9,7 +9,6 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 
 import java.util.ConcurrentModificationException;
-import java.util.Map;
 
 /**
  * A stateful matcher over UTF-8 input whose reported positions are relative byte offsets.
@@ -265,8 +264,6 @@ public final class Utf8Matcher {
           }
           case ReplacementSegment.GroupRef(var group) ->
               appendGroup(sink, bounds, group, expectedModCount);
-          case ReplacementSegment.NamedGroupRef(var group) ->
-              appendGroup(sink, bounds, group, expectedModCount);
         }
       }
       appendPosition = bounds[1];
@@ -364,10 +361,8 @@ public final class Utf8Matcher {
         return cachedTemplate;
       }
       String text = replacementInput.decode();
-      int groupCount = groupCount();
-      Map<String, Integer> namedGroups = pattern.namedGroups();
       Matcher.ReplacementSegment[] parsed =
-          Matcher.compileReplacementTemplate(text, groupCount, namedGroups);
+          Matcher.compileReplacementTemplate(text, groupCount(), pattern.namedGroups());
       ReplacementSegment[] compiled = new ReplacementSegment[parsed.length];
       boolean needsCaptures = false;
       for (int index = 0; index < parsed.length; index++) {
@@ -376,20 +371,8 @@ public final class Utf8Matcher {
               case Matcher.ReplacementSegment.Literal(var literal) ->
                   new ReplacementSegment.Literal(literal.getBytes(UTF_8));
               case Matcher.ReplacementSegment.GroupRef(var group) -> {
-                if (group > groupCount) {
-                  throw new IndexOutOfBoundsException(
-                      "No group " + group + " (groupCount=" + groupCount + ")");
-                }
                 needsCaptures |= group != 0;
                 yield new ReplacementSegment.GroupRef(group);
-              }
-              case Matcher.ReplacementSegment.NamedGroupRef(var name) -> {
-                Integer group = namedGroups.get(name);
-                if (group == null) {
-                  throw new IllegalArgumentException("No group with name <" + name + ">");
-                }
-                needsCaptures |= group != 0;
-                yield new ReplacementSegment.NamedGroupRef(group);
               }
             };
       }
@@ -445,7 +428,5 @@ public final class Utf8Matcher {
     }
 
     record GroupRef(int group) implements ReplacementSegment {}
-
-    record NamedGroupRef(int group) implements ReplacementSegment {}
   }
 }

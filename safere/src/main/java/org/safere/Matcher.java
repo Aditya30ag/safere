@@ -1083,18 +1083,15 @@ public final class Matcher implements MatchResult {
 
   /**
    * A pre-parsed segment of a replacement string. Segments are either literal text or group
-   * references (numbered or named). Pre-parsing avoids per-match scanning, {@code parseInt}, and
-   * {@code substring} allocation.
+   * references. Named references are resolved to group numbers while parsing. Pre-parsing avoids
+   * per-match scanning, {@code parseInt}, name lookups, and {@code substring} allocation.
    */
   sealed interface ReplacementSegment {
     /** A literal text segment to be appended verbatim. */
     record Literal(String text) implements ReplacementSegment {}
 
-    /** A numbered group reference ({@code $0}, {@code $1}, etc.). */
+    /** A group reference ({@code $0}, {@code $1}, or a resolved {@code ${name}}). */
     record GroupRef(int groupNum) implements ReplacementSegment {}
-
-    /** A named group reference ({@code ${name}}). */
-    record NamedGroupRef(String name) implements ReplacementSegment {}
   }
 
   private record NumericGroupReference(int groupNum, int end) {}
@@ -1156,10 +1153,11 @@ public final class Matcher implements MatchResult {
             throw new IllegalArgumentException("Missing closing '}' in replacement string");
           }
           String name = replacement.substring(nameStart, i);
-          if (!namedGroups.containsKey(name)) {
+          Integer groupNum = namedGroups.get(name);
+          if (groupNum == null) {
             throw new IllegalArgumentException("No group with name <" + name + ">");
           }
-          segments.add(new ReplacementSegment.NamedGroupRef(name));
+          segments.add(new ReplacementSegment.GroupRef(groupNum));
           i++; // skip '}'
         } else if (isAsciiDigit(replacement.charAt(i))) {
           // Numeric group reference: $0, $1, $12, etc.
@@ -1212,11 +1210,7 @@ public final class Matcher implements MatchResult {
 
   private static boolean templateNeedsCaptures(ReplacementSegment[] template) {
     for (ReplacementSegment seg : template) {
-      if (seg instanceof ReplacementSegment.GroupRef gRef) {
-        if (gRef.groupNum() > 0) {
-          return true;
-        }
-      } else if (seg instanceof ReplacementSegment.NamedGroupRef) {
+      if (seg instanceof ReplacementSegment.GroupRef gRef && gRef.groupNum() > 0) {
         return true;
       }
     }
@@ -1243,12 +1237,6 @@ public final class Matcher implements MatchResult {
           int end = groups[2 * g + 1];
           if (start >= 0 && end >= 0) {
             sb.append(text, start, end);
-          }
-        }
-        case ReplacementSegment.NamedGroupRef(var name) -> {
-          String g = group(name);
-          if (g != null) {
-            sb.append(g);
           }
         }
       }
