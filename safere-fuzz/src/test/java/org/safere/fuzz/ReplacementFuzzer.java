@@ -252,22 +252,20 @@ public final class ReplacementFuzzer {
       String replacement,
       boolean useStringBuffer) {
     FuzzSupport.MatcherPair replaceAllMatcher = pattern.matcher(input);
-    if (!replaceAllMatcher.replaceAll(replacement)) {
-      // A rejected template may still produce partial output before the append loop reaches the
-      // invalid part, so check the destination after rejection on a fresh matcher.
-      appendReplacementLoop(pattern, input, replacement, useStringBuffer);
-      return;
+    if (replaceAllMatcher.replaceAll(replacement)) {
+      replaceAllMatcher.reset();
+      replaceAllMatcher.find();
     }
-    replaceAllMatcher.reset();
-    replaceAllMatcher.find();
 
+    // Run replaceFirst on a fresh matcher even when replaceAll rejects the replacement, so each
+    // operation's exception class is checked against the JDK for the same input.
     FuzzSupport.MatcherPair replaceFirstMatcher = pattern.matcher(input);
-    if (!replaceFirstMatcher.replaceFirst(replacement)) {
-      appendReplacementLoop(pattern, input, replacement, useStringBuffer);
-      return;
+    if (replaceFirstMatcher.replaceFirst(replacement)) {
+      replaceFirstMatcher.hasReplacementMatchState();
     }
-    replaceFirstMatcher.hasReplacementMatchState();
 
+    // A rejected template may still produce partial output before the append loop reaches the
+    // invalid part, so the loop also checks the destination after rejection on a fresh matcher.
     appendReplacementLoop(pattern, input, replacement, useStringBuffer);
   }
 
