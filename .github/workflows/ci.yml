@@ -47,6 +47,9 @@ jobs:
       - name: Test snapshot publication ordering
         run: python .github/scripts/test_snapshot_freshness.py
 
+      - name: Test documentation-only change detection
+        run: python .github/scripts/test_classify_changes.py
+
       - name: Test repo-assist trust boundary and state handling
         run: >
           uv run --project .agents/skills/repo-assist --locked pytest
@@ -69,14 +72,7 @@ jobs:
           else
             FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
           fi
-          # Check if any project code files changed. Agent skills are repository
-          # automation assets and should not trigger the Java CI matrix.
-          CODE_FILES=$(echo "$FILES" | grep -vE '(\.md$|\.txt$|^LICENSE$|^\.agents/skills/)' | grep -v '^$' || true)
-          if [ -n "$CODE_FILES" ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "code=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "$FILES" | bash .github/scripts/classify-changes.sh
 
   prepare-maven-cache:
     needs: changes
